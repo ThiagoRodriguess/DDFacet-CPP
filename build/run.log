@@ -1,0 +1,209 @@
+╔══════════════════════════════════════════╗
+║  DDFacet Sequential Imaging Pipeline     ║
+║  Implementação Educacional v0.2          ║
+║  Fase: FFT + FFT_inv via FFTW3           ║
+╚══════════════════════════════════════════╝
+
+
+========================================
+  TESTE: Round-trip FFT → IFFT (1D)
+========================================
+  Simetria hermitiana: OK
+  Erro máx FFT→IFFT: 6.661338e-16  ✔ PASS
+
+========================================
+  TESTE: Round-trip FFT2D → IFFT2D
+========================================
+  Erro máx FFT2D→IFFT2D: 0.000000e+00  ✔ PASS
+
+========================================
+  CONFIGURAÇÃO DO PIPELINE
+========================================
+
+========================================
+  INITIALIZATION(v)
+========================================
+
+Configuração:
+  - Major Cycles (K): 10
+  - Facetas: 1 x 1 = 1 total
+  - Tamanho da imagem: 128 x 128 pixels
+  - Tamanho da faceta: 128 x 128 pixels
+  - Tamanho do pixel: 1.000000e+00 arcsec
+  - CLEAN gain (γ): 1.000000e-01
+  - Minor iterations: 20
+
+Inicializando modelo do céu (x)...
+  - x inicializado: 128 x 128 pixels
+Inicializando imagem residual (δy)...
+  - δy inicializado: 128 x 128 pixels
+Criando PSF...
+  - PSF criada: 128 x 128 pixels
+  - PSF sigma: 3.000000e+00 pixels
+
+Criando facetas...
+  Faceta 0 (0,0):
+    - Offset: (0, 0)
+    - Tamanho: 128 x 128 pixels
+    - Centro (l,m): (-0.000000e+00", 0.000000e+00")
+
+  Total de facetas criadas: 1
+
+========================================
+  INITIALIZATION COMPLETA
+========================================
+
+
+========================================
+  CÉU VERDADEIRO + MEASUREMENT SET SINTÉTICO
+========================================
+  Fontes injetadas no sky model:
+    pix=(56,56)  amp=1.000000e+00
+    pix=(72,64)  amp=7.000000e-01
+    pix=(64,72)  amp=4.000000e-01
+  [céu verdadeiro x_true] 128×128  min=0.0000  max=1.0000  sum=2.1000  peak=(56,56)
+  MS sintético gerado: 16000 visibilidades (8000 pares hermitianos), u_max=9.28e+04 λ, sem ruído.
+  [taper de apodização T] 128×128  min=0.0002  max=1.0000  sum=2607.5946  peak=(64,64)
+  [PSF (dirty beam)] 128×128  min=-0.1196  max=1.0000  sum=2.4613  peak=(64,64)
+  Fator de escala da imagem suja S = 6.1359
+
+========================================
+  LOOP PRINCIPAL (K=10 major cycles, I=1 faceta(s), J=1 MS)
+========================================
+
+=== MAJOR CYCLE 0 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 2.6605e+04
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.1152  max=0.8638  sum=4.8441  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.3127
+  ‖δv‖² = 2.6605e+04  | Components: 20  | Peak residual (img): 3.13e-01
+
+=== MAJOR CYCLE 1 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 8.1468e+03
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0592  max=0.5386  sum=2.9609  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.2097
+  ‖δv‖² = 8.1468e+03  | Components: 40  | Peak residual (img): 2.10e-01
+
+=== MAJOR CYCLE 2 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 2.1780e+03
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0271  max=0.3489  sum=1.7437  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.1496
+  ‖δv‖² = 2.1780e+03  | Components: 60  | Peak residual (img): 1.50e-01
+
+=== MAJOR CYCLE 3 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 3.8466e+02
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0143  max=0.2259  sum=0.9279  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.0985
+  ‖δv‖² = 3.8466e+02  | Components: 80  | Peak residual (img): 9.85e-02
+
+=== MAJOR CYCLE 4 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 1.0245e+02
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0151  max=0.1519  sum=0.3772  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.0670
+  ‖δv‖² = 1.0245e+02  | Components: 100  | Peak residual (img): 6.70e-02
+
+=== MAJOR CYCLE 5 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 3.2936e+02
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0337  max=0.1022  sum=0.0061  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.0494
+  ‖δv‖² = 3.2936e+02  | Components: 120  | Peak residual (img): 4.94e-02
+
+=== MAJOR CYCLE 6 ===
+    [imaging_fft] Faceta 0 (MS 0): 128×128 px | l₀=-0.00"  m₀=0.00" → grade UV gerada.
+    [degrid] Faceta 0 (MS 0): 16000 visibilidades preditas (kernel 11×11).
+  [compute_residual] MS 0: ‖δv‖² = 6.4239e+02
+    [grid] Faceta 0 (MS 0): 16000 visibilidades residuais espalhadas na grade UV.
+    [imaging_fft_inv] Faceta 0: grade UV → imagem δy acumulada.
+  [δy (imagem residual suja)] 128×128  min=-0.0437  max=0.0708  sum=-0.2082  peak=(56,56)
+    [CLEAN] 20 componentes nesta deconvolução | pico residual final = 0.0468
+  ‖δv‖² = 6.4239e+02  | Components: 140  | Peak residual (img): 4.68e-02
+  [early stop] ‖δv‖² subindo — melhor modelo no ciclo 4.
+
+  Melhor modelo: ciclo 4  (‖δv‖² = 1.0245e+02)
+
+========================================
+  VALIDAÇÃO: recuperação das fontes
+========================================
+  [modelo recuperado x̂ (unidades apodizadas)] 128×128  min=0.0000  max=1.2328  sum=2.3671  peak=(56,56)
+  [modelo físico x̂·T] 128×128  min=0.0000  max=1.0566  sum=2.1067  peak=(56,56)
+
+  Histórico de ‖δv‖² (primeiro→último):
+    2.66e+04  8.15e+03  2.18e+03  3.85e+02  1.02e+02  3.29e+02  6.42e+02  
+  Pico residual decrescente: 
+  ‖δv‖² convergiu (< 50% do inicial): ✔ SIM
+
+  Fluxo físico recuperado por fonte (janela 3×3):
+    pix=(56,56)  amp_true=1.000  recuperado=1.057  (106%)  ✔
+    pix=(72,64)  amp_true=0.700  recuperado=0.706  (101%)  ✔
+    pix=(64,72)  amp_true=0.400  recuperado=0.344  (86%)  ✔
+
+  Pico do modelo em (56,56), fonte mais brilhante em (56,56)  → distância L1 = 0 px  ✔
+
+  RESULTADO: ✔ Fontes recuperadas com sucesso.
+
+
+========================================
+  ESTADO DO PIPELINE
+========================================
+
+Configuração:
+  - Major Cycles (K): 10
+  - Facetas (I): 1
+  - Measurement Sets (J): 1
+
+Progresso:
+  - Major Cycle atual: 6/10
+  - MS atual: 0
+  - Faceta atual: 0
+
+Estatísticas:
+  - Pico do residual: 0.05
+  - Componentes CLEAN: 140
+
+Modelo (x):
+  - Min: 0
+  - Max: 1
+  - Soma: 2
+
+========================================
+
+========================================
+  PRÓXIMOS PASSOS
+========================================
+
+  ✔ [FEITO]   FFT(x̂, i, j)           → imaging_fft()
+  ✔ [FEITO]   FFT_inv(gφi, i, j)     → imaging_fft_inv()
+  ✔ [FEITO]   Degrid(ĝ, i, j)         → degrid()  (kernel Gaussiano)
+  ✔ [FEITO]   Grid(δv, i, j)          → grid()    (adjunto)
+  ✔ [FEITO]   compute_residual         → δv = v − v̂
+  ✔ [FEITO]   Deconvolution(δy, PSF)  → Högbom CLEAN
+  ✔ [FEITO]   Loop principal (k,j,i)  → Algoritmo 1 completo
+  ○ [FASE 2]  Faceamento I>1 end-to-end (célula UV por faceta)
+  ○ [FASE 2]  W-term, MSMF, paralelização OpenMP
+
+╔══════════════════════════════════════════╗
+║  PROGRAMA FINALIZADO COM SUCESSO         ║
+╚══════════════════════════════════════════╝
