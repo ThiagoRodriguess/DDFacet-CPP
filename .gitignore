@@ -29,3 +29,8 @@ model_ompc.fits
 *:Zone.Identifier
 .DS_Store
 Thumbs.db
+
+# Documentacao especifica de apresentacao (fora do repo)
+apresentacao/
+DOCUMENTACAO_ALGORITMO.*
+scripts/demo.sh

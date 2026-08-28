@@ -1,192 +1,195 @@
-# DDFacet C++
+# DDFacet-CPP
 
-Implementação educacional em **C++17** do **Algoritmo 1** do pipeline de imageamento
-**DDFacet** (Monnier et al., *SiPS IEEE 2022*), usado em **rádio-interferometria**, com
-foco em **paralelização** (OpenMP intra-nó + MPI multi-nó).
+A C++ implementation of the DDFacet radio-interferometric imaging pipeline,
+parallelized for distributed execution — with MPI and with **OpenMP Cluster
+(OMPC)**.
 
-> **Objetivo do algoritmo:** a partir de amostras incompletas e irregulares da Transformada
-> de Fourier do céu (as *visibilidades* medidas por um interferômetro), **reconstruir a
-> imagem do céu** — descobrir onde estão as fontes de rádio e qual o brilho de cada uma.
-
-Para a explicação detalhada da física e de cada passo, veja
-[`DOCUMENTACAO_ALGORITMO.md`](DOCUMENTACAO_ALGORITMO.md) (e o PDF).
+Undergraduate research project (PIBIC), Institute of Computing, UNICAMP.
 
 ---
 
-## Funcionalidades
+## What problem this solves
 
-| Componente | Descrição |
-|---|---|
-| **Pipeline Algoritmo 1** | FFT (FFTW3) → Degrid → Residual → Grid → FFT⁻¹ → CLEAN (Högbom), em *major cycles* |
-| **Measurement Set real** | leitura via **casacore** (`read_ms`); geração via **python-casacore** (`tools/make_ms.py`) |
-| **Faceamento** (eixo I) | imagem dividida em `N×N` facetas, cada uma com seu phase center — fase `exp(∓2πi(u·l₀+v·m₀))` no degrid/grid |
-| **OpenMP** (intra-nó) | paraleliza o laço de **facetas** (`if(I>1)`) e, internamente, os laços de **visibilidades/pixels** |
-| **MPI** (multi-nó, eixo J) | distribui os **Measurement Sets** entre ranks; `MPI_Allreduce` soma as grades UV |
+A radio interferometer does not measure an image of the sky. It measures
+**visibilities**: samples of the Fourier transform of the sky brightness,
+recorded together with the `(u, v, w)` baseline coordinates of every pair of
+antennas. Recovering the image means inverting that relation — and the
+inversion is ill-posed, because the `(u, v)` plane is sampled sparsely and
+irregularly.
 
-**Validação** (céu de 3 fontes pontuais conhecidas, imagem 128×128):
-
-| Config (I × J) | Recuperação |
-|---|---|
-| I=1, J=1 | 99% |
-| I=1, J=4 (multi-MS) | 99% |
-| I=2×2, J=2 (faceamento + multi-MS) | 100% |
-| I=4×4, J=1 | 100% |
-
-**Escalabilidade** (CPU i7-10750H, 6 núcleos físicos):
-
-- OpenMP (16 facetas): ~**4.3×** em 6 threads.
-- MPI (J=4): **1.0× / 1.72× / 2.80×** em 1 / 2 / 4 ranks — com **resultado idêntico**
-  (invariante de correção do `MPI_Allreduce`).
-
----
-
-## Estrutura do projeto
+The reconstruction is therefore iterative. Each **major cycle** predicts what
+visibilities the current sky model would produce, subtracts them from the
+measured ones, transforms the residual back into the image domain, and
+deconvolves it to improve the model:
 
 ```
-ddfacet_cpp/
-├── include/
-│   ├── ddfacet.h        estruturas de dados + declarações + pseudocódigo
-│   ├── ms_io.h          interface do leitor de Measurement Set
-│   └── mpi_util.h       camada MPI (isolada atrás de #ifdef USE_MPI)
-├── src/
-│   ├── ddfacet.cpp      operadores: imaging_fft(_inv), degrid, grid, residual, deconvolution
-│   ├── fft.cpp          FFT/IFFT 2D via FFTW3, fftshift/ifftshift
-│   ├── ms_io.cpp        leitor de MS real (casacore)
-│   └── main.cpp         geração/leitura do MS, dirty beam, loop principal, validação
-├── tools/
-│   └── make_ms.py       gerador de Measurement Set real (python-casacore)
-├── CMakeLists.txt
-├── DOCUMENTACAO_ALGORITMO.md / .pdf   documentação detalhada
-└── data/                Measurement Sets gerados (NÃO versionar — ver abaixo)
+       ┌─────────────────────────────────────────────────┐
+       │                                                 │
+   model ──FFT──► UV grid ──degrid──► predicted vis     │
+                                            │            │
+                                measured ───┴──► residual│
+                                                 │       │
+                              dirty image ◄─FFT⁻¹┴─grid  │
+                                     │                   │
+                                   CLEAN ────► new model ┘
 ```
 
----
+This is **Algorithm 1** of:
 
-## Dependências
+> N. Monnier et al., *"Fast Grid to Grid Interpolation for Radio
+> Interferometric Imaging"*, IEEE Workshop on Signal Processing Systems
+> (SiPS), 2022.
 
-Testado em **Ubuntu (WSL)** com g++ 13.
+The dominant cost is gridding and degridding — millions of visibilities, each
+convolved with a kernel onto a grid. That work is what gets parallelized here.
 
-| Dependência | Pacote (apt) | Uso |
-|---|---|---|
-| Compilador C++17 + OpenMP | `g++` | base |
-| FFTW3 (+ threads) | `libfftw3-dev` | FFT 2D |
-| casacore | `casacore-dev` | leitura de MS |
-| python-casacore + numpy | `python3-casacore python3-numpy` | geração de MS |
-| MPI *(opcional)* | `libopenmpi-dev openmpi-bin` | eixo J multi-nó |
+## The parallelization idea
+
+Gridding is a **reduction**: the UV grid is a sum over visibilities,
+
+```
+grid = Σₖ K(visₖ)
+```
+
+Sums are associative, so the visibilities can be partitioned arbitrarily,
+accumulated independently, and combined at the end. This yields two
+implementations that share the same numerical core:
+
+| Path | Distribution unit | Who moves the data |
+|------|-------------------|--------------------|
+| **MPI** (`src/main.cpp`) | row range of a Measurement Set | the programmer, via `MPI_Allreduce` |
+| **OMPC** (`src/main_ompc.cpp`) | **spectral channel** | the runtime, via `map()` clauses |
+
+Under MPI each rank reads its slice of rows, grids it locally, and the partial
+grids are summed with an all-reduce. Under OpenMP Cluster the loop body is a
+`#pragma omp target` region: the runtime ships it to a remote node and moves
+the arrays itself.
+
+Channels are the natural unit for the OMPC path — each has its own frequency
+and is independent until the grids are summed, matching the *one channel per
+architecture node* layout used by the reference SDP pipelines.
+
+### Correctness criterion
+
+Because the computation is a reduction, the result must not depend on how the
+work was split:
+
+> The output image must be **identical** whether it was produced by 1, 2 or 4
+> execution units.
+
+A discrepancy would mean a lost visibility, a duplicated one, or a write race.
+This invariant — rather than a speedup number — is what the test suite checks
+first.
+
+## Repository layout
+
+```
+include/
+  ddfacet.h        core data structures (Array2D, ImageF, GridC, Facet)
+  ms_io.h          Measurement Set reading (casacore)
+  mpi_util.h       MPI layer, guarded by #ifdef USE_MPI
+  ompc_kernel.h    POD-only offloadable kernel (omp declare target)
+src/
+  ddfacet.cpp      degrid, grid, FFT, deconvolution
+  fft.cpp          FFTW wrappers
+  ms_io.cpp        casacore reader (per-channel)
+  main.cpp         MPI pipeline
+  main_ompc.cpp    OpenMP Cluster pipeline
+tools/
+  ms_export.cpp    MS → per-channel .vis (POD) for the OMPC binary
+  make_ms.py       synthetic MS generator (python-casacore)
+scripts/
+  sorgan_ompc.sh   build and run on the cluster
+  demo_wterm.sh    w-term A/B demonstration
+```
+
+## Design notes
+
+**Why the OMPC binary does not read Measurement Sets.** The OpenMP Cluster
+container ships the patched LLVM toolchain, not the scientific libraries. A
+binary linking casacore or FFTW will not build inside it. So MS reading happens
+outside (`tools/ms_export`, which writes one flat `.vis` file per channel), the
+FFT is implemented in-tree (radix-2, hence power-of-two image sizes), and the
+FITS writer has no dependencies.
+
+**Why the kernel is written over flat arrays.** Only POD data crosses an
+`omp target` boundary — no `std::vector`, no `std::complex`, no I/O. Complex
+values are carried as separate real/imaginary arrays, which is also what the
+`map()` clauses want.
+
+**Why degrid, residual and grid are fused.** Running them in a single pass over
+the visibilities means the predicted visibilities are never materialized and
+never travel back across the network — and inter-node transfer is the dominant
+cost under OMPC.
+
+**Physical detail worth knowing.** Selecting a spectral channel changes the
+observing frequency, hence the wavelength that converts `UVW` from metres to
+wavelengths. Reading channel *n* with the frequency of channel 0 silently
+produces wrong `(u, v)` coordinates.
+
+## Building
+
+Requires `g++` (C++17), FFTW3, casacore, and an MPI implementation.
 
 ```bash
-sudo apt install g++ cmake libfftw3-dev casacore-dev \
-                 python3-casacore python3-numpy libopenmpi-dev openmpi-bin
-```
-
----
-
-## Compilação
-
-### OpenMP (padrão)
-
-```bash
-g++ -std=c++17 -O2 -Wall -fopenmp -Iinclude -isystem /usr/include/casacore \
-    src/ddfacet.cpp src/fft.cpp src/main.cpp src/ms_io.cpp \
-    -lfftw3_threads -lfftw3 -lm -lcasa_ms -lcasa_tables -lcasa_casa \
-    -o build/ddfacet_demo
-```
-
-### MPI (eixo J / multi-nó)
-
-```bash
+# MPI pipeline
 mpic++ -std=c++17 -O2 -fopenmp -DUSE_MPI -Iinclude -isystem /usr/include/casacore \
     src/ddfacet.cpp src/fft.cpp src/main.cpp src/ms_io.cpp \
     -lfftw3_threads -lfftw3 -lm -lcasa_ms -lcasa_tables -lcasa_casa \
     -o build/ddfacet_mpi
+
+# MS → per-channel .vis exporter
+g++ -std=c++17 -O2 -Iinclude -isystem /usr/include/casacore \
+    tools/ms_export.cpp src/ms_io.cpp \
+    -lcasa_ms -lcasa_tables -lcasa_casa -o build/ms_export
+
+# OMPC pipeline — locally, target regions fall back to the host
+g++ -std=c++17 -O2 -fopenmp -Iinclude src/main_ompc.cpp -o build/ddfacet_ompc
+
+# OMPC pipeline — on the cluster, inside the container
+apptainer exec ompc_latest.sif clang++ -O2 -std=c++17 -fopenmp \
+    -fopenmp-targets=x86_64-pc-linux-gnu -Iinclude src/main_ompc.cpp -o ddfacet_ompc
 ```
 
-### CMake
+## Running
 
 ```bash
-mkdir -p build && cd build
-cmake ..                 # ou: cmake -DUSE_MPI=ON ..
-make
+# MPI, imaging a Measurement Set distributed by row range
+DDF_MS=path/to/data.ms DDF_NPIX=256 OMP_NUM_THREADS=1 mpirun -np 4 ./build/ddfacet_mpi
+
+# Export the channels, then run the OMPC pipeline
+./build/ms_export path/to/data.ms data/obs
+./build/ddfacet_ompc data/obs 128 3 4        # prefix, npix, major cycles, channels
 ```
 
-> Sem `-fopenmp` o código ainda compila e roda serial (pragmas guardados por
-> `#ifdef _OPENMP`). Sem `-DUSE_MPI` o MPI vira no-op (1 processo).
+On the cluster, `scripts/sorgan_ompc.sh` wraps the MPMD launch (N proxy-device
+processes plus one head process) and includes an invariance check that runs on
+one node and on N nodes and compares the results.
 
----
+### Environment variables
 
-## Execução
+| Variable | Effect |
+|----------|--------|
+| `DDF_MS` | Measurement Set to image (MPI path) |
+| `DDF_NPIX` | image size in pixels |
+| `DDF_CHANNEL` | spectral channel to process |
+| `DDF_FACETS` | number of facets per axis (N×N) |
+| `DDF_DDE` | enable direction-dependent gains |
+| `DDF_OFFSET` | shift the facet phase centre, in pixels |
+| `DDF_NOW` | disable the w-term (for A/B comparison) |
 
-Rode **a partir da raiz do projeto** (o programa precisa de `data/` e `tools/`).
+## Status
 
-```bash
-# recuperação básica (1 faceta, 1 MS) — lê o MS real via casacore
-OMP_NUM_THREADS=6 ./build/ddfacet_demo
+Implemented and verified: the full major-cycle pipeline, MPI distribution by
+row range, OMPC distribution by channel, faceting, the w-term in the facet
+phase shift, and scalar direction-dependent gains. The invariance criterion
+holds in both paths.
 
-# faceamento 2×2 + 2 Measurement Sets
-DDF_FACETS=2 DDF_NMS=2 OMP_NUM_THREADS=6 ./build/ddfacet_demo
+Not yet implemented: W-projection (the gridding kernel is currently Gaussian,
+so wide-field accuracy is limited) and validation against a reference imager.
 
-# MPI: 4 ranks × 3 threads (híbrido), 4 Measurement Sets
-DDF_NMS=4 OMP_NUM_THREADS=3 mpirun -np 4 ./build/ddfacet_mpi
-```
+## Data
 
-### Variáveis de ambiente
-
-| Variável | Padrão | Significado |
-|---|---|---|
-| `DDF_FACETS` | 1 | nº de facetas por eixo (`N×N` facetas) |
-| `DDF_NMS` | 1 | nº de Measurement Sets (eixo J) |
-| `OMP_NUM_THREADS` | (sistema) | threads OpenMP por processo |
-| `mpirun -np R` | 1 | nº de ranks MPI (binário `-DUSE_MPI`) |
-
-**O que observar na saída:** testes de FFT `✔ PASS`; `[read_ms]` (MS lido via casacore);
-`‖δv‖²` caindo a cada major cycle; e a validação final
-`RESULTADO: ✔ Fontes recuperadas com sucesso` (~99–100%).
-
----
-
-## Sobre a pasta `data/`
-
-Os Measurement Sets (`data/sim_f*_ms*.ms`) são **gerados automaticamente** na primeira
-execução: se o `.ms` não existe, o programa chama `tools/make_ms.py` (python-casacore) para
-criá-lo. **Não precisam ser versionados nem enviados** — são artefatos reprodutíveis.
-
-Recomenda-se um `.gitignore` com:
-
-```
-build/
-data/
-*.o
-```
-
-Para reproduzir em outra máquina basta o código-fonte + as dependências (incluindo
-`python-casacore` para gerar os MS).
-
----
-
-## Como funciona (resumo)
-
-```
-for k in K major cycles:
-    for j in J Measurement Sets:        # MPI: distribuído entre ranks
-        for i in I facetas:             # OpenMP: paralelo
-            ĝ = FFT(x̂, i)               # modelo → domínio UV
-            v̂ = Degrid(ĝ, i)            # amostra UV nas posições (u,v)
-        δv = v − v̂                      # residual (medido − predito)
-        for i in I facetas:
-            g += Grid(δv, i)            # residual → grade UV (acumula)
-    # MPI_Allreduce das grades UV entre ranks (soma sobre todos os MS)
-    for i in I facetas:
-        δy += FFT⁻¹(g, i)               # grade UV → imagem suja
-    x̂ = Deconvolution(δy, PSF)          # Högbom CLEAN
-```
-
-A cada *major cycle* o modelo `x̂` ganha as fontes que faltavam e o residual encolhe.
-Detalhes completos (visibilidades, plano UV, apodização, correção de grid) em
-[`DOCUMENTACAO_ALGORITMO.md`](DOCUMENTACAO_ALGORITMO.md).
-
----
-
-## Referência
-
-Monnier et al., *"A imaging pipeline for radio interferometry"*, IEEE SiPS 2022.
-Implementação C++ educacional — fases sequencial + OpenMP + MPI + leitura de MS (casacore).
+Development used the GLEAM / SKA1-Low simulated dataset (EoR1 field, generated
+with OSKAR), which provides Measurement Sets together with sky models and
+reference images. Measurement Sets and derived files are not versioned.
