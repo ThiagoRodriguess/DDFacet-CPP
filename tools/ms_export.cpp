@@ -1,62 +1,40 @@
 /**
  * @file ms_export.cpp
- * @brief Export a Measurement Set to simple binary files, ONE PER CHANNEL.
+ * @brief Export a Measurement Set to .vis files, one per spectral channel.
  *
- * --- Why this tool exists ---------------------------------------------------
- * The OpenMP Cluster container ships the patched clang and the offload runtime,
- * but NOT casacore. An OMPC binary linking casacore will not build in it.
+ * This is the host half of the pipeline. It parses the MS with casacore and
+ * writes the flat POD format defined in vis_file.h, which the imaging binary
+ * reads without any external library — necessary because the OpenMP Cluster
+ * container ships the patched compiler but not casacore.
  *
- * The natural split is:
+ * Beyond satisfying that constraint it is also cheaper: the MS is parsed once,
+ * and repeated distributed runs read a format that needs no parsing at all.
  *
- *    ms_export   (HOST, g++ + casacore)   MS  --->  .vis per channel
- *    ddfacet_ompc(CONTAINER, clang)       .vis --->  offload per channel ---> image
- *
- * Beyond solving the dependency, this is good design: the MS is parsed ONCE and
- * repeated distributed runs read a cheap flat format, with no casacore table
- * parsing on every node.
- *
- * --- .vis file format (little-endian, plain POD) ----------------------------
- *    [header]
- *      char   magic[8]  = "DDFVIS01"
- *      int32  nvis
- *      int32  channel
- *      double freq_hz          frequency of THIS channel
- *      double umax_wl          max|(u,v)| in wavelengths (to derive cell_size)
- *    [data, in this order]
- *      double u[nvis], v[nvis], w[nvis]     in wavelengths
- *      float  re[nvis], im[nvis]            measured visibility
- *      uint8  flag[nvis]                    1 = discard
- *
- * Arrays are separate (not interleaved) because that is how the OMPC kernel
- * consumes them: each becomes its own map() clause.
- *
- * --- Usage ------------------------------------------------------------------
- *    ./ms_export <path.ms> <output_prefix> [max_rows]
- *    e.g.: ./ms_export ../data/sim_large.ms/sim_large.ms data/large
- *         -> data/large_ch0.vis, data/large_ch1.vis, ...
- *
- * Build:
- *    g++ -std=c++17 -O2 -Iinclude -isystem /usr/include/casacore \
- *        tools/ms_export.cpp src/ms_io.cpp \
- *        -lcasa_ms -lcasa_tables -lcasa_casa -o build/ms_export
+ * Usage:
+ *   ./ms_export <path.ms> <output_prefix> [max_rows]
+ *   e.g. ./ms_export data/sim_large.ms data/obs
+ *        -> data/obs_ch0.vis, data/obs_ch1.vis, ...
  */
 #include "ms_io.h"
+#include "vis_file.h"
 
 #include <casacore/tables/Tables/Table.h>
 #include <casacore/tables/Tables/ArrayColumn.h>
 #include <casacore/casa/Arrays/Array.h>
 
+#include <cmath>
 #include <cstdio>
-#include <cstdint>
-#include <cstring>
 #include <cstdlib>
 #include <string>
-#include <vector>
 
 using namespace ddfacet;
 
-/** @brief How many channels the MS has (SPECTRAL_WINDOW subtable). */
-static int count_channels(const std::string& ms_path) {
+namespace {
+
+constexpr double RAD_TO_ARCSEC = 206264.806247;
+
+/** @brief How many spectral channels the MS has. */
+int count_channels(const std::string& ms_path) {
     try {
         casacore::Table spw(ms_path + "/SPECTRAL_WINDOW");
         casacore::ArrayColumn<casacore::Double> cf(spw, "CHAN_FREQ");
@@ -67,74 +45,62 @@ static int count_channels(const std::string& ms_path) {
     }
 }
 
-/** @brief Write a VisibilitySet in the .vis format described above. */
-static bool write_vis(const std::string& fn, const VisibilitySet& vis,
-                       int channel, double freq_hz, double umax_wl) {
-    std::FILE* f = std::fopen(fn.c_str(), "wb");
-    if (!f) { std::fprintf(stderr, "[ms_export] could not open '%s'\n", fn.c_str()); return false; }
+/** @brief Convert a VisibilitySet into the on-disk representation. */
+VisFile to_vis_file(const VisibilitySet& vis, int channel, double freq_hz) {
+    VisFile out;
+    out.channel = channel;
+    out.freq_hz = freq_hz;
+    out.resize(static_cast<int>(vis.nvis));
 
-    const std::int32_t nvis = static_cast<std::int32_t>(vis.nvis);
-    const std::int32_t ch   = static_cast<std::int32_t>(channel);
-
-    std::fwrite("DDFVIS01", 1, 8, f);
-    std::fwrite(&nvis,    sizeof(std::int32_t), 1, f);
-    std::fwrite(&ch,      sizeof(std::int32_t), 1, f);
-    std::fwrite(&freq_hz, sizeof(double),       1, f);
-    std::fwrite(&umax_wl, sizeof(double),       1, f);
-
-    /* u, v, w already come in wavelengths from read_ms */
-    std::fwrite(vis.u.data(), sizeof(double), vis.nvis, f);
-    std::fwrite(vis.v.data(), sizeof(double), vis.nvis, f);
-    std::fwrite(vis.w.data(), sizeof(double), vis.nvis, f);
-
-    /* complex -> two arrays (re/im), what the offloadable kernel consumes */
-    std::vector<float> re(vis.nvis), im(vis.nvis);
-    std::vector<std::uint8_t> fl(vis.nvis);
+    double umax = 0.0;
     for (std::size_t k = 0; k < vis.nvis; ++k) {
-        re[k] = vis.data[k].real();
-        im[k] = vis.data[k].imag();
-        fl[k] = vis.flag[k] ? 1u : 0u;
-    }
-    std::fwrite(re.data(), sizeof(float),        vis.nvis, f);
-    std::fwrite(im.data(), sizeof(float),        vis.nvis, f);
-    std::fwrite(fl.data(), sizeof(std::uint8_t), vis.nvis, f);
+        out.u[k] = vis.u[k];
+        out.v[k] = vis.v[k];
+        out.w[k] = vis.w[k];
+        out.re[k] = vis.data[k].real();
+        out.im[k] = vis.data[k].imag();
+        out.flag[k] = vis.flag[k] ? 1u : 0u;
 
-    const bool ok = (std::ferror(f) == 0);
-    std::fclose(f);
-    return ok;
+        const double r = std::sqrt(vis.u[k] * vis.u[k] + vis.v[k] * vis.v[k]);
+        if (r > umax) umax = r;
+    }
+    out.umax_wl = umax;
+    return out;
 }
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr,
             "usage: %s <path.ms> <output_prefix> [max_rows]\n"
-            "  e.g. %s ../data/sim_large.ms/sim_large.ms data/large\n"
-            "      -> data/large_ch0.vis, data/large_ch1.vis, ...\n",
+            "  e.g. %s data/sim_large.ms data/obs\n"
+            "       -> data/obs_ch0.vis, data/obs_ch1.vis, ...\n",
             argv[0], argv[0]);
         return 1;
     }
-    const std::string ms_path = argv[1];
-    const std::string prefix = argv[2];
-    const long max_rows = (argc > 3) ? std::atol(argv[3]) : -1;
+    const std::string ms_path  = argv[1];
+    const std::string prefix   = argv[2];
+    const long        max_rows = (argc > 3) ? std::atol(argv[3]) : -1;
 
     const int nchan = count_channels(ms_path);
     if (nchan <= 0) return 1;
 
-    /* Channel 0 metadata: u_max suggests the cell size for the pipeline. */
+    // Channel 0 metadata: u_max suggests the cell size for the pipeline.
     double freq0 = 0.0, umax0 = 0.0;
-    long nrows = 0;
-    int nch_check = 0;
-    if (!read_ms_metadata(ms_path, freq0, umax0, nrows, 0, &nch_check)) return 1;
+    long   nrows = 0;
+    if (!read_ms_metadata(ms_path, freq0, umax0, nrows)) return 1;
 
-    const long rows_to_read = (max_rows > 0 && max_rows < nrows) ? max_rows : nrows;
+    const long rows_to_read =
+        (max_rows > 0 && max_rows < nrows) ? max_rows : nrows;
 
     std::printf("========================================================\n");
     std::printf("  ms_export - MS -> one .vis file per channel\n");
     std::printf("  MS      : %s\n", ms_path.c_str());
     std::printf("  rows    : %ld (of %ld)\n", rows_to_read, nrows);
-    std::printf("  channels: %d   (each becomes one OMPC unit of work)\n", nchan);
+    std::printf("  channels: %d   (each becomes one unit of work)\n", nchan);
     std::printf("  u_max   : %.1f lambda  -> suggested cell %.4f arcsec\n",
-                umax0, (1.0 / (3.0 * umax0)) * 206264.806247);
+                umax0, (1.0 / (3.0 * umax0)) * RAD_TO_ARCSEC);
     std::printf("========================================================\n");
 
     for (int c = 0; c < nchan; ++c) {
@@ -144,22 +110,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[ms_export] failed reading channel %d\n", c);
             return 1;
         }
-        /* u_max for this channel (it changes with frequency) */
-        double umax = 0.0;
-        for (std::size_t k = 0; k < vis.nvis; ++k) {
-            const double r = std::sqrt(vis.u[k] * vis.u[k] + vis.v[k] * vis.v[k]);
-            if (r > umax) umax = r;
-        }
+
+        const VisFile out = to_vis_file(vis, c, freq);
 
         char fn[1024];
         std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefix.c_str(), c);
-        if (!write_vis(fn, vis, c, freq, umax)) return 1;
+        if (!vis_file_write(fn, out)) return 1;
 
-        std::printf("  channel %d: %8zu vis | %.3f MHz | u_max %.1f lambda -> %s\n",
-                    c, vis.nvis, freq / 1e6, umax, fn);
+        std::printf("  channel %d: %8d vis | %.3f MHz | u_max %.1f lambda -> %s\n",
+                    c, out.nvis, out.freq_hz / 1e6, out.umax_wl, fn);
     }
 
     std::printf("--------------------------------------------------------\n");
-    std::printf("  Done. Copy the .vis files to the cluster with the OMPC binary.\n");
+    std::printf("  Done. Copy the .vis files to the cluster with the binary.\n");
     return 0;
 }

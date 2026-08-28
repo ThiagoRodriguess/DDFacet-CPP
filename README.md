@@ -105,11 +105,24 @@ POD data may cross the boundary, so the kernel is written over flat arrays with
 complex values carried as separate real and imaginary parts.
 
 ```
-include/   ddfacet.h  ms_io.h  ompc_kernel.h
-src/       main_ompc.cpp  ms_io.cpp
-tools/     ms_export.cpp  make_ms.py
-scripts/   sorgan_ompc.sh  demo_wterm.sh
+include/
+  vis_file.h       the .vis interchange format, reader and writer together
+  ompc_kernel.h    the offloaded kernel: degrid + residual + grid, POD only
+  fft.h            in-tree radix-2 FFT (no FFTW)
+  fits.h           minimal FITS writer (no cfitsio)
+  ms_io.h          Measurement Set reading, per channel (casacore)
+src/
+  main_ompc.cpp    the pipeline: major cycles, PSF, CLEAN
+  vis_file.cpp  fft.cpp  fits.cpp  ms_io.cpp
+tools/
+  ms_export.cpp    MS -> .vis, the host-side half
+scripts/
+  sorgan_ompc.sh   build and run on the cluster
+  demo_wterm.sh    w-term A/B demonstration
 ```
+
+Reader and writer of the `.vis` format live in the same header on purpose: the
+payload is raw bytes, so a mismatch between the two ends would be silent.
 
 ## Physics implemented
 
@@ -128,12 +141,21 @@ adjoint, which preserves the adjoint relation between the two operators.
 ## Building
 
 ```bash
+cmake -B build && cmake --build build
+```
+
+That produces `build/ddfacet_ompc` and, if casacore is present,
+`build/ms_export`. By hand:
+
+```bash
 mkdir -p build
 
-g++ -std=c++17 -O2 -fopenmp -Iinclude src/main_ompc.cpp -o build/ddfacet_ompc
+g++ -std=c++17 -O2 -fopenmp -Iinclude \
+    src/main_ompc.cpp src/fft.cpp src/fits.cpp src/vis_file.cpp \
+    -o build/ddfacet_ompc
 
 g++ -std=c++17 -O2 -Iinclude -isystem /usr/include/casacore \
-    tools/ms_export.cpp src/ms_io.cpp \
+    tools/ms_export.cpp src/ms_io.cpp src/vis_file.cpp \
     -lcasa_ms -lcasa_tables -lcasa_casa -o build/ms_export
 ```
 
@@ -142,11 +164,10 @@ which is what enables offload:
 
 ```bash
 apptainer exec ompc_latest.sif clang++ -O2 -std=c++17 -fopenmp \
-    -fopenmp-targets=x86_64-pc-linux-gnu -Iinclude src/main_ompc.cpp \
+    -fopenmp-targets=x86_64-pc-linux-gnu -Iinclude \
+    src/main_ompc.cpp src/fft.cpp src/fits.cpp src/vis_file.cpp \
     -o ddfacet_ompc
 ```
-
-CMake also works: `cmake -B build && cmake --build build`.
 
 ## Running
 

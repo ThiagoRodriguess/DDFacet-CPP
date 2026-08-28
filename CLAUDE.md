@@ -3,13 +3,16 @@
 ## Commands
 
 ```bash
-# pipeline (no external deps)
-g++ -std=c++17 -O2 -Wall -Wextra -fopenmp -Iinclude src/main_ompc.cpp \
+cmake -B build && cmake --build build      # both binaries
+
+# or by hand — pipeline (no external deps)
+g++ -std=c++17 -O2 -Wall -Wextra -fopenmp -Iinclude \
+    src/main_ompc.cpp src/fft.cpp src/fits.cpp src/vis_file.cpp \
     -o build/ddfacet_ompc
 
 # MS exporter (needs casacore)
 g++ -std=c++17 -O2 -Iinclude -isystem /usr/include/casacore \
-    tools/ms_export.cpp src/ms_io.cpp \
+    tools/ms_export.cpp src/ms_io.cpp src/vis_file.cpp \
     -lcasa_ms -lcasa_tables -lcasa_casa -o build/ms_export
 
 # run
@@ -55,12 +58,14 @@ write race.
 
 ## Data
 
-Measurement Sets are not versioned.
+Measurement Sets are not versioned. Use the GLEAM / SKA1-Low simulated set:
+`sim_large.ms` has 4 channels and real non-zero `w`, so it exercises both the
+channel axis and the w-term. `sim_small.ms` has a single channel and cannot
+test distribution.
 
-- `tools/make_ms.py` generates a synthetic MS (needs `python-casacore`).
-  Its `w` is **exactly zero** — useless for the w-term.
-- GLEAM / SKA1-Low: `sim_large.ms` has 4 channels and real `w`;
-  `sim_small.ms` has one channel, so it cannot exercise the channel axis.
+The MS itself can live anywhere — `ms_export` takes its path. Only the `.vis`
+files need to sit where the prefix points. Note that the dataset's zip extracts
+a nested directory: the real MS is `sim_large.ms/sim_large.ms/`.
 
 ## Cluster
 
