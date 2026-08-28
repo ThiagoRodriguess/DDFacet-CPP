@@ -255,10 +255,29 @@ int main(int argc, char** argv) {
     const double lm2 = l0 * l0 + m0 * m0;
     const bool   use_w = (std::getenv("DDF_NOW") == nullptr);
     const double n0m1 = (use_w && lm2 < 1.0) ? (std::sqrt(1.0 - lm2) - 1.0) : 0.0;
-    const double gain_re = 1.0, gain_im = 0.0;
+    /* ── DDE: ganho complexo dependente da direção ────────────────────────────
+     * Versão escalar do formalismo RIME/Jones. Aplicado como ×G no degrid e
+     * ×conj(G) no operador adjunto (dentro do kernel), o que preserva a relação
+     * adjunta. Identidade (1,0) por padrão → sem efeito.
+     * DDF_DDE=1 ativa um G DETERMINÍSTICO, função apenas de (l0,m0): tem de ser
+     * determinístico, senão cada nó geraria um valor diferente e o resultado
+     * passaria a depender de quantos nós rodaram.                            */
+    double gain_re = 1.0, gain_im = 0.0;
+    const bool use_dde = (std::getenv("DDF_DDE") != nullptr);
+    if (use_dde) {
+        const double r   = std::sqrt(lm2);
+        const double amp = 1.0 / (1.0 + 40.0 * r * r);   /* análogo ao beam primário */
+        const double pha = 150.0 * r;                     /* análogo a erro de fase   */
+        gain_re = amp * std::cos(pha);
+        gain_im = amp * std::sin(pha);
+    }
 
     std::printf("  fase   : offset=%.0f px  l0=%.3e m0=%.3e  termo-w n0-1=%.6e %s\n",
                 off_pix, l0, m0, n0m1, use_w ? "" : "[DDF_NOW: DESLIGADO]");
+    std::printf("  DDE    : |G|=%.6f  arg(G)=%.6f rad %s\n",
+                std::sqrt(gain_re * gain_re + gain_im * gain_im),
+                std::atan2(gain_im, gain_re),
+                use_dde ? "" : "[identidade — use DDF_DDE=1]");
 
     /* ── PSF (dirty beam): grade das visibilidades unitárias, no host ──────── */
     std::vector<float> psf_re(ng, 0.0f), psf_im(ng, 0.0f);
