@@ -74,5 +74,5 @@ Offload is working when the `[WORKER]` lines print PIDs different from
 
 ## Conventions
 
-Comments and documentation are in English. A few internal identifiers are still
-in Portuguese (`carregar_vis`, `escrever_fits`, `ciclo`); match the file you edit.
+Everything is in English: comments, documentation, identifiers and program
+output.
