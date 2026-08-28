@@ -52,6 +52,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <cstdint>
+#include <cstring>
 #include <fftw3.h>
 
 #ifdef _OPENMP
@@ -327,6 +329,55 @@ static ImageF compute_grid_correction(int nx, int ny, int fnx, int fny) {
     return T;
 }
 
+/**
+ * @brief Escreve uma ImageF como arquivo FITS (BITPIX=-32, float big-endian).
+ *
+ * Formato mínimo: cabeçalho de cards de 80 chars (bloco de 2880) + dados float32
+ * em big-endian (padrão FITS). Permite abrir a imagem no DS9 e comparar com a
+ * saída do DDF.py / da bancada. Sem dependências externas.
+ */
+static bool write_fits(const std::string& fn, const ImageF& img) {
+    std::ofstream f(fn, std::ios::binary);
+    if (!f) return false;
+
+    int ncards = 0;
+    auto card = [&](const std::string& s) {
+        std::string c = s; c.resize(80, ' '); f.write(c.data(), 80); ++ncards;
+    };
+    auto icard = [&](std::string key, long val) {
+        key.resize(8, ' ');
+        std::ostringstream v; v << val;
+        std::string vs = v.str();
+        std::string field(vs.size() < 20 ? 20 - vs.size() : 0, ' '); field += vs;
+        card(key + "= " + field);
+    };
+    card("SIMPLE  =                    T");
+    card("BITPIX  =                  -32");
+    card("NAXIS   =                    2");
+    icard("NAXIS1", img.nx);
+    icard("NAXIS2", img.ny);
+    card("BSCALE  =                  1.0");
+    card("BZERO   =                  0.0");
+    card("END");
+    while (ncards % 36 != 0) card("");   // completa o bloco de 2880 bytes
+
+    // dados: float32 big-endian, eixo NAXIS1 (x) mais rápido
+    std::size_t nbytes = 0;
+    for (int j = 0; j < img.ny; ++j)
+        for (int i = 0; i < img.nx; ++i) {
+            float val = img(i, j);
+            std::uint32_t u; std::memcpy(&u, &val, 4);
+            unsigned char be[4] = {
+                static_cast<unsigned char>((u >> 24) & 0xFF),
+                static_cast<unsigned char>((u >> 16) & 0xFF),
+                static_cast<unsigned char>((u >> 8)  & 0xFF),
+                static_cast<unsigned char>( u        & 0xFF) };
+            f.write(reinterpret_cast<char*>(be), 4); nbytes += 4;
+        }
+    while (nbytes % 2880 != 0) { char z = 0; f.write(&z, 1); ++nbytes; }
+    return static_cast<bool>(f);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
@@ -375,6 +426,12 @@ int main(int argc, char* argv[]) {
     // correta no degrid/grid.
     int nfac = 1;
     if (const char* e = std::getenv("DDF_FACETS")) { nfac = std::atoi(e); if (nfac < 1) nfac = 1; }
+
+    // CANAL espectral a processar (DDF_CHANNEL). Cada canal é uma unidade de
+    // trabalho independente, com a sua própria frequência: é o eixo previsto
+    // para a distribuição "canal c → nó c" no OpenMP Cluster (OMPC).
+    int channel = 0;
+    if (const char* e = std::getenv("DDF_CHANNEL")) { channel = std::atoi(e); if (channel < 0) channel = 0; }
     config.n_facets_x      = nfac;
     config.n_facets_y      = nfac;
     config.image_size_x    = 128;    // Imagem 128×128 pixels
@@ -386,6 +443,37 @@ int main(int argc, char* argv[]) {
     config.clean_gain      = 0.1;
     config.clean_threshold = 1e-3;
 
+    // === MODO MS REAL (DDF_MS) ================================================
+    // Aponta para um Measurement Set arbitrário (ex.: data/sim_small.ms) e
+    // AUTOCONFIGURA cell/npix a partir dos metadados. As visibilidades serão
+    // distribuídas por FAIXA DE LINHAS entre os ranks MPI (1 MS grande → N ranks).
+    const char* real_ms_env  = std::getenv("DDF_MS");
+    const bool  real_mode    = (real_ms_env != nullptr);
+    const std::string real_ms_path = real_mode ? std::string(real_ms_env) : std::string();
+    long real_nrows = 0;
+    if (real_mode) {
+        double md_freq = 0.0, md_umax = 0.0;
+        int md_nchan = 0;
+        if (!read_ms_metadata(real_ms_path, md_freq, md_umax, real_nrows,
+                              channel, &md_nchan) || md_umax <= 0.0) {
+            if (root) std::cerr << "ERRO: metadados inválidos de '" << real_ms_path << "'.\n";
+            mpi_finalize(); return 1;
+        }
+        int npix = 1024;
+        if (const char* e = std::getenv("DDF_NPIX")) { npix = std::atoi(e); if (npix < 64) npix = 64; }
+        config.image_size_x  = npix;
+        config.image_size_y  = npix;
+        // cell = 1/(3·u_max) → ~3 pixels por feixe (oversample ~1.5).
+        config.cell_size_rad = 1.0 / (3.0 * md_umax);
+        if (root)
+            std::cout << "  MODO MS REAL: " << real_ms_path << "\n"
+                      << "    freq=" << md_freq / 1e6 << " MHz  u_max=" << md_umax
+                      << " λ  linhas=" << real_nrows << "\n"
+                      << "    npix=" << npix << "  cell="
+                      << config.cell_size_rad / ARCSEC2RAD << " arcsec  FoV="
+                      << npix * config.cell_size_rad * RAD2DEG << " deg\n";
+    }
+
     // =========================================================================
     // PASSO 1: INITIALIZATION(v)
     // =========================================================================
@@ -394,70 +482,99 @@ int main(int argc, char* argv[]) {
     initialization(state, config);
 
     const int I = config.total_facets();
-
-    // Nº GLOBAL de Measurement Sets (eixo J), configurável via DDF_NMS (padrão 1).
-    // Vários MS = várias observações do mesmo céu (cobertura UV combinada).
-    int J = 1;
-    if (const char* e = std::getenv("DDF_NMS")) { J = std::atoi(e); if (J < 1) J = 1; }
-
-    // =========================================================================
-    // CÉU VERDADEIRO + MEASUREMENT SETS REAIS (casacore) + distribuição MPI
-    // =========================================================================
-    if (root) {
-    std::cout << "\n========================================\n";
-    std::cout << "  CÉU VERDADEIRO + MEASUREMENT SETS (casacore)\n";
-    std::cout << "  J=" << J << " MS  |  MPI ranks=" << mpi_n << "\n";
-    std::cout << "========================================\n";
-    }
-
-    const int N = config.n_facets_x;
-
-    // O rank 0 GERA os J arquivos MS (cobertura UV distinta por MS); barreira
-    // para os demais ranks esperarem antes de ler.
-    auto ms_name = [&](int j) {
-        return "data/sim_f" + std::to_string(N) + "_ms" + std::to_string(j) + ".ms";
-    };
-    // sidecar de fontes vem do MS 0 (make_ms.py escreve <ms_sem_ext>.sources.txt)
-    const std::string src_path = "data/sim_f" + std::to_string(N) + "_ms0.sources.txt";
-    if (root) {
-        for (int j = 0; j < J; ++j) {
-            if (!std::filesystem::exists(ms_name(j))) {
-                std::cout << "  Gerando MS " << j << " (N=" << N << ")...\n";
-                int rc = std::system(("python3 tools/make_ms.py \"" + ms_name(j) + "\" "
-                            + std::to_string(N) + " " + std::to_string(j)).c_str());
-                if (rc != 0) std::cout << "  [aviso] make_ms.py retornou " << rc << "\n";
-            }
-        }
-    }
-    mpi_barrier();   // todos esperam os MS existirem
-
-    std::vector<PointSource> sources = read_sources_sidecar(src_path);
-    if (sources.empty()) sources = { {56,56,1.0f}, {72,64,0.7f}, {64,72,0.4f} };
-    inject_sources(state.x, sources);
-    if (root) print_image_stats(state.x, "céu verdadeiro x_true");
-
-    // DISTRIBUIÇÃO MPI DO EIXO J: o rank r processa os MS j com (j % size == r).
-    // Cada rank guarda só o seu subconjunto em state.measurement_sets.
-    // As visibilidades vêm SEMPRE do Measurement Set real via casacore (read_ms);
-    // se a leitura falhar, é erro fatal (sem gerador sintético em memória).
     double ms_freq = 0.0;
-    int n_local = 0;
-    for (int j = 0; j < J; ++j) {
-        if (j % mpi_n != mpi_r) continue;
+    std::vector<PointSource> sources;   // vazio no modo MS real (céu desconhecido)
+
+    if (real_mode) {
+        // ── MS REAL: distribuição MPI por FAIXA DE LINHAS de um único MS ────
+        if (root) {
+            std::cout << "\n========================================\n";
+            std::cout << "  MEASUREMENT SET REAL (distribuído por linhas)\n";
+            std::cout << "  " << real_nrows << " visibilidades / " << mpi_n << " rank(s)\n";
+            std::cout << "========================================\n";
+        }
+        const long s    = static_cast<long>(static_cast<double>(real_nrows) * mpi_r / mpi_n);
+        const long e    = static_cast<long>(static_cast<double>(real_nrows) * (mpi_r + 1) / mpi_n);
+        const long nloc = e - s;
         state.measurement_sets.emplace_back();
         MeasurementSetInfo& ms = state.measurement_sets.back();
-        ms.id = j;
-        if (!read_ms(ms_name(j), ms.visibilities, ms_freq)) {
-            std::cerr << "[rank " << mpi_r << "] ERRO: não foi possível ler o MS '"
-                      << ms_name(j) << "' via casacore. Abortando.\n";
-            mpi_finalize();
-            return 1;
+        ms.id = 0; ms.path = real_ms_path;
+        if (!read_ms(real_ms_path, ms.visibilities, ms_freq, s, nloc, channel)) {
+            std::cerr << "[rank " << mpi_r << "] ERRO ao ler a faixa do MS.\n";
+            mpi_finalize(); return 1;
         }
-        ms.path = ms_name(j);
-        ++n_local;
+    } else {
+        // ── MS GERADOS: distribuição MPI do eixo J (um MS por índice) ───────
+        int J = 1;
+        if (const char* e = std::getenv("DDF_NMS")) { J = std::atoi(e); if (J < 1) J = 1; }
+        if (root) {
+            std::cout << "\n========================================\n";
+            std::cout << "  MEASUREMENT SETS GERADOS (casacore)\n";
+            std::cout << "  J=" << J << " MS  |  MPI ranks=" << mpi_n << "\n";
+            std::cout << "========================================\n";
+        }
+        const int N = config.n_facets_x;
+        auto ms_name = [&](int j) {
+            return "data/sim_f" + std::to_string(N) + "_ms" + std::to_string(j) + ".ms";
+        };
+        const std::string src_path = "data/sim_f" + std::to_string(N) + "_ms0.sources.txt";
+        if (root) {
+            for (int j = 0; j < J; ++j)
+                if (!std::filesystem::exists(ms_name(j))) {
+                    std::cout << "  Gerando MS " << j << " (N=" << N << ")...\n";
+                    int rc = std::system(("python3 tools/make_ms.py \"" + ms_name(j) + "\" "
+                                + std::to_string(N) + " " + std::to_string(j)).c_str());
+                    if (rc != 0) std::cout << "  [aviso] make_ms.py retornou " << rc << "\n";
+                }
+        }
+        mpi_barrier();   // todos esperam os MS existirem
+
+        sources = read_sources_sidecar(src_path);
+        if (sources.empty()) sources = { {56,56,1.0f}, {72,64,0.7f}, {64,72,0.4f} };
+        inject_sources(state.x, sources);
+        if (root) print_image_stats(state.x, "céu verdadeiro x_true");
+
+        for (int j = 0; j < J; ++j) {
+            if (j % mpi_n != mpi_r) continue;
+            state.measurement_sets.emplace_back();
+            MeasurementSetInfo& ms = state.measurement_sets.back();
+            ms.id = j;
+            if (!read_ms(ms_name(j), ms.visibilities, ms_freq, 0, -1, channel)) {
+                std::cerr << "[rank " << mpi_r << "] ERRO ao ler o MS '"
+                          << ms_name(j) << "'. Abortando.\n";
+                mpi_finalize(); return 1;
+            }
+            ms.path = ms_name(j);
+        }
     }
-    std::cout << "  [rank " << mpi_r << "] " << n_local
-              << " MS locais (lidos via casacore).\n";
+    std::cout << "  [rank " << mpi_r << "] "
+              << (state.measurement_sets.empty() ? 0u : state.measurement_sets[0].visibilities.nvis)
+              << " visibilidades locais.\n";
+
+    // ─── DDE: ganhos dependentes da direção, por faceta (opt-in: DDF_DDE=1) ──
+    // Sem DDF_DDE todos os G_i são identidade (1,0) → comportamento idêntico ao
+    // de antes. Com DDF_DDE, cada faceta recebe um G_i DETERMINÍSTICO (função só
+    // de (l₀,m₀) e do índice) — igual em todos os ranks, então o invariante MPI
+    // continua valendo. Amplitude decai com a distância ao centro (análogo ao
+    // beam primário) e a fase cresce com o índice (análogo a erro ionosférico).
+    if (std::getenv("DDF_DDE") != nullptr) {
+        for (int i = 0; i < static_cast<int>(state.facets.size()); ++i) {
+            Facet& f = state.facets[static_cast<size_t>(i)];
+            const double r   = std::sqrt(f.l_center * f.l_center + f.m_center * f.m_center);
+            const double amp = 1.0 / (1.0 + 40.0 * r * r);   // "beam primário"
+            const double pha = 0.15 * i;                      // erro de fase
+            f.directional_gain = std::polar(amp, pha);
+        }
+        if (root) {
+            std::cout << "\n  [DDE] ganhos direcionais G_i ATIVOS ("
+                      << state.facets.size() << " facetas):\n";
+            for (int i = 0; i < static_cast<int>(state.facets.size()) && i < 6; ++i)
+                std::cout << "    faceta " << i
+                          << ": |G|=" << std::abs(state.facets[static_cast<size_t>(i)].directional_gain)
+                          << "  arg(G)=" << std::arg(state.facets[static_cast<size_t>(i)].directional_gain)
+                          << " rad\n";
+        }
+    }
 
     // Taper de apodização, LADRILHADA por faceta (cada faceta tem seu phase
     // center). Usada só para recuperar o fluxo físico no final (x̂·T).
@@ -489,7 +606,7 @@ int main(int argc, char* argv[]) {
     if (root) {
     std::cout << "\n========================================\n";
     std::cout << "  LOOP PRINCIPAL (K=" << config.n_major_cycles
-              << " major cycles, I=" << I << " faceta(s), J=" << J << " MS)\n";
+              << " major cycles, I=" << I << " faceta(s))\n";
 #ifdef _OPENMP
     std::cout << "  OpenMP: " << omp_get_max_threads() << " thread(s)/rank";
 #else
@@ -511,6 +628,7 @@ int main(int argc, char* argv[]) {
     // que produziu o menor ‖δv‖² e paramos se piorar em ciclos consecutivos.
     std::vector<double> resid_history;
     ImageF  best_model   = state.x;
+    ImageF  dirty_image;              // imagem suja do 1º ciclo (modelo vazio)
     double  best_resid   = std::numeric_limits<double>::max();
     int     best_cycle   = 0;
     int     worse_streak = 0;
@@ -595,6 +713,7 @@ int main(int argc, char* argv[]) {
         if (beam_peak != 0.0)
             for (auto& d : state.delta_y.data)
                 d = static_cast<float>(d / beam_peak);
+        if (k == 0) dirty_image = state.delta_y;   // dirty map (modelo vazio)
         if (root) print_image_stats(state.delta_y, "δy (imagem residual suja)");
 
         // --- DECONVOLVE: x̂ = CLEAN(δy, PSF) ---
@@ -635,8 +754,26 @@ int main(int argc, char* argv[]) {
               << std::defaultfloat << "\n";
 
     // =========================================================================
-    // VALIDAÇÃO: recuperação das fontes
+    // VALIDAÇÃO / SAÍDA
     // =========================================================================
+    if (real_mode) {
+        // MS real: sem céu conhecido — grava FITS (dirty + modelo) e reporta stats.
+        std::filesystem::create_directories("output");
+        ImageF model_phys(state.x.nx, state.x.ny);
+        for (int jj = 0; jj < state.x.ny; ++jj)
+            for (int ii = 0; ii < state.x.nx; ++ii)
+                model_phys(ii, jj) = state.x(ii, jj) * Tcorr(ii, jj);
+        std::cout << "\n========================================\n";
+        std::cout << "  MS REAL: saída de imagens (FITS)\n";
+        std::cout << "========================================\n";
+        print_image_stats(dirty_image, "dirty image (ciclo 0)");
+        print_image_stats(model_phys,  "modelo CLEAN (físico)");
+        const bool okd = write_fits("output/dirty.fits", dirty_image);
+        const bool okm = write_fits("output/model.fits", model_phys);
+        std::cout << "\n  FITS gravado: output/dirty.fits " << (okd ? "✔" : "✘")
+                  << "  |  output/model.fits " << (okm ? "✔" : "✘") << "\n";
+        std::cout << "  Abrir no DS9:  ds9 output/dirty.fits -cmap inferno -zoom to fit\n";
+    } else {
     std::cout << "\n========================================\n";
     std::cout << "  VALIDAÇÃO: recuperação das fontes\n";
     std::cout << "========================================\n";
@@ -697,6 +834,7 @@ int main(int argc, char* argv[]) {
                       ? "✔ Fontes recuperadas com sucesso."
                       : "✘ Recuperação fora da tolerância.")
               << "\n";
+    }   // else (!real_mode)
 
     // =========================================================================
     // RESUMO DO ESTADO

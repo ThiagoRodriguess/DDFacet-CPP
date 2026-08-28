@@ -6,10 +6,23 @@
  */
 
 #include "ddfacet.h"
+#include <cstdlib>
 #include <cmath>
 #include <iomanip>
 
 namespace ddfacet {
+
+/**
+ * @brief Liga/desliga o TERMO-W (interruptor de demonstração: DDF_NOW=1 desliga).
+ *
+ * Existe para poder mostrar lado a lado o efeito do termo w·(n0-1) na fase da
+ * faceta. Por padrão o termo está ATIVO; DDF_NOW=1 volta ao comportamento antigo,
+ * em que o w era lido do MS e ignorado no cálculo.
+ */
+static bool ddf_use_w_term() {
+    static const bool on = (std::getenv("DDF_NOW") == nullptr);
+    return on;
+}
 
 //=============================================================================
 // IMPLEMENTAÇÃO: Initialization(v)
@@ -510,6 +523,13 @@ void degrid(DDFacetState& state, int facet_idx, int ms_idx) {
     const int    nvis = static_cast<int>(vis.nvis);
     const double l0   = facet.l_center;   // centro de fase da faceta
     const double m0   = facet.m_center;
+    // Termo-w: n₀ = √(1 − l₀² − m₀²). A relação de Fourier no céu é esférica,
+    // não plana — além de (u·l₀ + v·m₀) entra w·(n₀ − 1). Para a faceta central
+    // (l₀=m₀=0) temos n₀=1 e o termo se anula. Guarda contra l₀²+m₀² ≥ 1.
+    const double lm2  = l0 * l0 + m0 * m0;
+    const double n0m1 = ddf_use_w_term() ? ((lm2 < 1.0) ? (std::sqrt(1.0 - lm2) - 1.0) : 0.0) : 0.0;
+    // Ganho dependente da direção (DDE) desta faceta.
+    const std::complex<double> gain = facet.directional_gain;
     long n_used = 0;
     #pragma omp parallel for schedule(static) reduction(+:n_used)
     for (int k = 0; k < nvis; ++k) {
@@ -541,10 +561,15 @@ void degrid(DDFacetState& state, int facet_idx, int ms_idx) {
 
         if (wsum > 0.0) acc /= wsum;   // normaliza pela soma dos pesos
 
-        // Deslocamento de fase da faceta: exp(-2πi(u·l₀ + v·m₀)).
-        // Para a faceta central (l₀=m₀=0) é identidade.
-        const double ph = -2.0 * PI * (vis.u[k] * l0 + vis.v[k] * m0);
+        // Deslocamento de fase da faceta, agora COM o termo-w:
+        //   exp(-2πi(u·l₀ + v·m₀ + w·(n₀−1)))
+        // Para a faceta central (l₀=m₀=0 → n₀=1) continua sendo identidade.
+        const double ph = -2.0 * PI * (vis.u[k] * l0 + vis.v[k] * m0
+                                       + vis.w[k] * n0m1);
         acc *= std::complex<double>(std::cos(ph), std::sin(ph));
+
+        // DDE: aplica o ganho da direção desta faceta (identidade por padrão).
+        acc *= gain;
 
         facet.pred_contrib[k] = std::complex<float>(static_cast<float>(acc.real()),
                                                     static_cast<float>(acc.imag()));
@@ -582,6 +607,13 @@ void grid(DDFacetState& state, int facet_idx, int ms_idx) {
     const int    nvis = static_cast<int>(vis.nvis);
     const double l0   = facet.l_center;   // centro de fase da faceta
     const double m0   = facet.m_center;
+    // Termo-w (idêntico ao degrid; aqui entra com o sinal oposto na fase).
+    const double lm2  = l0 * l0 + m0 * m0;
+    const double n0m1 = ddf_use_w_term() ? ((lm2 < 1.0) ? (std::sqrt(1.0 - lm2) - 1.0) : 0.0) : 0.0;
+    // DDE: no operador ADJUNTO aplica-se o conjugado do ganho.
+    const std::complex<float> gain_conj =
+        std::conj(std::complex<float>(static_cast<float>(facet.directional_gain.real()),
+                                      static_cast<float>(facet.directional_gain.imag())));
 
     // PARALELIZAÇÃO (OpenMP): visibilidades vizinhas escrevem nas MESMAS células
     // da grade UV → corrida de escrita. Padrão de gridding paralelo: cada thread
@@ -598,12 +630,14 @@ void grid(DDFacetState& state, int facet_idx, int ms_idx) {
         for (int k = 0; k < nvis; ++k) {
             if (vis.flag[k]) continue;
 
-            // Deslocamento de fase da faceta (conjugado do degrid):
-            // δv·exp(+2πi(u·l₀ + v·m₀)). Identidade para a faceta central.
-            const double ph = +2.0 * PI * (vis.u[k] * l0 + vis.v[k] * m0);
+            // Deslocamento de fase da faceta (conjugado do degrid), com termo-w:
+            // δv·exp(+2πi(u·l₀ + v·m₀ + w·(n₀−1))). Identidade na faceta central.
+            const double ph = +2.0 * PI * (vis.u[k] * l0 + vis.v[k] * m0
+                                           + vis.w[k] * n0m1);
             const std::complex<float> phase(static_cast<float>(std::cos(ph)),
                                             static_cast<float>(std::sin(ph)));
-            const std::complex<float> dv_k = res.data[k] * phase;
+            // DDE adjunto: ×conj(G) — espelha o ×G aplicado no degrid.
+            const std::complex<float> dv_k = res.data[k] * phase * gain_conj;
 
             const double ix_c = vis.u[k] * nx * cell + nx / 2.0;
             const double iy_c = vis.v[k] * ny * cell + ny / 2.0;

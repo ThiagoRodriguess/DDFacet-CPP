@@ -1,0 +1,31 @@
+# ─── Binários e artefatos de compilação ──────────────────────────────────────
+build/
+*.o
+*.so
+*.a
+*.exe
+
+# ─── Dados: pesados e reproduzíveis, não versionar ───────────────────────────
+# Measurement Sets (diretórios casacore)
+*.ms/
+data/*.ms/
+# Visibilidades exportadas por tools/ms_export (regeneráveis a partir do MS)
+*.vis
+data/*.vis
+# Imagens de saída
+*.fits
+output/
+# Listas de fontes geradas
+data/*.sources.txt
+
+# ─── Saídas de execução ──────────────────────────────────────────────────────
+*.log
+*.png
+*.b64.txt
+dirty_ompc.fits
+model_ompc.fits
+
+# ─── Sistema ─────────────────────────────────────────────────────────────────
+*:Zone.Identifier
+.DS_Store
+Thumbs.db

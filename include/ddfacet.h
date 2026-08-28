@@ -296,7 +296,16 @@ struct Facet {
     // Centro da faceta (cossenos diretores)
     double l_center;             // Cosseno diretor l
     double m_center;             // Cosseno diretor m
-    
+
+    // Efeito Dependente da Direção (DDE) — o "DD" de DDFacet.
+    // Versão ESCALAR do formalismo RIME/Jones: um ganho complexo G por direção
+    // (faceta), representando beam primário / ionosfera / erros de fase.
+    // Aplicado como ×G no degrid e ×conj(G) no grid, o que PRESERVA a relação
+    // adjunta entre os dois operadores. Padrão (1,0) = identidade (sem DDE).
+    // Com múltiplas polarizações, G viraria uma matriz de Jones 2×2.
+    std::complex<double> directional_gain;
+
+
     // Tamanho da faceta em pixels
     int npix_x;                  // Pixels na direção x
     int npix_y;                  // Pixels na direção y
@@ -322,9 +331,10 @@ struct Facet {
     std::vector<std::complex<float>> pred_contrib;
 
     // Construtor padrão
-    Facet() : id(0), facet_i(0), facet_j(0), 
+    Facet() : id(0), facet_i(0), facet_j(0),
               ra_center(0), dec_center(0),
               l_center(0), m_center(0),
+              directional_gain(1.0, 0.0),
               npix_x(0), npix_y(0),
               offset_x(0), offset_y(0) {}
 };

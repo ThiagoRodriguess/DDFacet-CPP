@@ -1,0 +1,283 @@
+<title>Tutorial · DDFacet com OpenMP Cluster</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --surface:#ffffff; --surface-2:#eef2f7; --line:#d8dee8;
+    --ink:#111620; --muted:#596475; --faint:#8b95a5;
+    --accent:#0d6e6e; --accent-soft:#0d6e6e1a;
+    --warm:#a8500c; --warm-soft:#a8500c14;
+    --good:#15803d;
+    --term-bg:#0e151f; --term-ink:#d6e1ee; --term-dim:#75849a; --term-accent:#4fdcc4;
+    --mono:ui-monospace,"Cascadia Code","SFMono-Regular",Consolas,monospace;
+    --sans:system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0b0e14; --surface:#131922; --surface-2:#1a212c; --line:#27303d;
+      --ink:#e6ecf4; --muted:#96a2b3; --faint:#68737f;
+      --accent:#2dd4bf; --accent-soft:#2dd4bf1f;
+      --warm:#f59e0b; --warm-soft:#f59e0b1a;
+      --good:#4ade80;
+      --term-bg:#080d14; --term-ink:#d6e1ee; --term-dim:#68778b; --term-accent:#4fdcc4;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b0e14; --surface:#131922; --surface-2:#1a212c; --line:#27303d;
+    --ink:#e6ecf4; --muted:#96a2b3; --faint:#68737f;
+    --accent:#2dd4bf; --accent-soft:#2dd4bf1f;
+    --warm:#f59e0b; --warm-soft:#f59e0b1a;
+    --good:#4ade80;
+    --term-bg:#080d14; --term-ink:#d6e1ee; --term-dim:#68778b; --term-accent:#4fdcc4;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg); color:var(--ink); font-family:var(--sans); line-height:1.62; margin:0;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:880px; margin:0 auto; padding:clamp(1.5rem,4vw,3.5rem) clamp(1rem,4vw,2rem) 4rem}
+  header{border-bottom:1px solid var(--line); padding-bottom:1.6rem; margin-bottom:1rem}
+  .eyebrow{font-family:var(--mono); font-size:.72rem; letter-spacing:.18em; text-transform:uppercase;
+    color:var(--accent); margin:0 0 .8rem}
+  h1{font-size:clamp(1.8rem,4.5vw,2.5rem); line-height:1.1; margin:0 0 .6rem; font-weight:680;
+    letter-spacing:-.02em; text-wrap:balance}
+  h1 .thin{color:var(--muted); font-weight:400}
+  .lede{font-size:1.02rem; color:var(--muted); max-width:62ch; margin:0}
+  nav.toc{display:flex; gap:.45rem; flex-wrap:wrap; margin:1.5rem 0 0}
+  nav.toc a{font-family:var(--mono); font-size:.75rem; text-decoration:none; color:var(--muted);
+    border:1px solid var(--line); border-radius:999px; padding:.32rem .75rem; background:var(--surface)}
+  nav.toc a:hover{color:var(--accent); border-color:var(--accent)}
+  section{margin:2.8rem 0}
+  h2{font-size:1.25rem; font-weight:650; margin:0 0 .3rem; display:flex; align-items:baseline; gap:.7rem}
+  h2 .n{font-family:var(--mono); font-size:.78rem; color:var(--accent); font-weight:600}
+  h2 + .sub{color:var(--muted); margin:.1rem 0 1.3rem; max-width:64ch}
+  h3{font-size:1rem; font-weight:640; margin:1.7rem 0 .4rem}
+  p{max-width:68ch}
+  .muted{color:var(--muted)} strong{font-weight:640}
+  code{font-family:var(--mono); font-size:.86em; background:var(--surface-2); padding:.12em .4em; border-radius:5px}
+  .where{display:inline-flex; align-items:center; gap:.4rem; font-family:var(--mono); font-size:.66rem;
+    letter-spacing:.09em; text-transform:uppercase; padding:.2rem .6rem; border-radius:999px;
+    border:1px solid var(--line); color:var(--muted); background:var(--surface); margin:0 0 .45rem}
+  .where.pc{border-color:var(--accent); color:var(--accent)}
+  .where.cl{border-color:var(--warm); color:var(--warm)}
+  .term{background:var(--term-bg); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:.5rem 0 1rem}
+  .term .bar{display:flex; align-items:center; gap:.5rem; padding:.42rem .8rem; border-bottom:1px solid #ffffff14}
+  .term .bar .dot{width:9px;height:9px;border-radius:50%;background:#ffffff26}
+  .term .bar .lbl{font-family:var(--mono); font-size:.64rem; letter-spacing:.1em; text-transform:uppercase; color:var(--term-dim)}
+  .term pre{margin:0; padding:.8rem 1rem; overflow-x:auto; font-family:var(--mono); font-size:.81rem;
+    line-height:1.6; color:var(--term-ink)}
+  .term pre .c{color:var(--term-dim)}
+  .term pre .k{color:var(--term-accent)}
+  .out{background:var(--surface-2); border:1px dashed var(--line); border-radius:9px; padding:.75rem 1rem;
+    margin:.5rem 0 1rem; font-family:var(--mono); font-size:.77rem; color:var(--muted); overflow-x:auto}
+  .out b{color:var(--good)}
+  .note{background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--warm);
+    border-radius:9px; padding:.9rem 1.1rem; margin:1.1rem 0; font-size:.92rem}
+  .note b{color:var(--warm)}
+  .note.ok{border-left-color:var(--accent)} .note.ok b{color:var(--accent)}
+  .tbl{overflow-x:auto; border:1px solid var(--line); border-radius:11px; margin:1.2rem 0}
+  table{width:100%; border-collapse:collapse; font-size:.9rem}
+  th,td{padding:.62rem .9rem; text-align:left; border-top:1px solid var(--line); vertical-align:top}
+  thead th{background:var(--surface-2); font-size:.7rem; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--muted); font-weight:600; border-top:none}
+  tbody tr td{background:var(--surface)}
+  td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right}
+  .flow{display:flex; flex-wrap:wrap; gap:.4rem; align-items:stretch; background:var(--surface);
+    border:1px solid var(--line); border-radius:12px; padding:1rem; margin:1.2rem 0; overflow-x:auto}
+  .flow .b{flex:1 1 0; min-width:94px; background:var(--surface-2); border:1px solid var(--line);
+    border-radius:9px; padding:.6rem .5rem; text-align:center}
+  .flow .b .t{font-weight:620; font-size:.85rem; margin:0 0 .15rem}
+  .flow .b .d{font-size:.7rem; color:var(--muted); margin:0; line-height:1.35}
+  .flow .b.hl{border-color:var(--accent); background:var(--accent-soft)}
+  .flow .a{align-self:center; color:var(--accent); flex:0 0 auto; font-size:1.05rem}
+  .keyfacts{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:1px;
+    background:var(--line); border:1px solid var(--line); border-radius:12px; overflow:hidden; margin:1.3rem 0}
+  .keyfacts div{background:var(--surface); padding:.95rem 1rem}
+  .keyfacts .k{font-family:var(--mono); font-size:.64rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--muted); margin:0 0 .35rem}
+  .keyfacts .val{font-size:1.3rem; font-weight:660; letter-spacing:-.02em; font-variant-numeric:tabular-nums; margin:0}
+  footer{margin-top:3rem; padding-top:1.3rem; border-top:1px solid var(--line); font-size:.8rem;
+    color:var(--muted); display:flex; justify-content:space-between; flex-wrap:wrap; gap:.5rem}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">PIBIC · Tutorial passo a passo</p>
+  <h1>DDFacet com OpenMP Cluster <span class="thin">— rodar e apresentar</span></h1>
+  <p class="lede">Como executar o pipeline de imageamento DDFacet distribuído por canal no cluster sorgan usando OMPC, e o que mostrar ao orientador quando terminar.</p>
+  <nav class="toc">
+    <a href="#oq">0 · O que é OMPC</a>
+    <a href="#dados">1 · Preparar dados</a>
+    <a href="#enviar">2 · Enviar</a>
+    <a href="#build">3 · Compilar</a>
+    <a href="#rodar">4 · Rodar</a>
+    <a href="#mostrar">5 · Apresentar</a>
+  </nav>
+</header>
+
+<section id="oq">
+  <h2><span class="n">00</span> O que é OMPC, e por que ele muda o código</h2>
+  <p class="sub">A diferença para o MPI explícito não é sintática — é sobre <em>quem</em> distribui.</p>
+  <p>No <strong>MPI manual</strong>, o programador distribui: cada rank calcula sua fatia e chama <code>MPI_Allreduce</code> à mão. No <strong>OpenMP Cluster</strong>, você escreve <code>#pragma omp target</code> e o <strong>runtime</strong> despacha aquela região para um nó remoto via MPI; os dados viajam pelas cláusulas <code>map()</code>.</p>
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>MPI explícito</th><th>OMPC</th></tr></thead>
+    <tbody>
+      <tr><td>Quem distribui</td><td>o programador</td><td>o runtime</td></tr>
+      <tr><td>Como os dados viajam</td><td><code>MPI_Allreduce</code> à mão</td><td>cláusulas <code>map(to:/from:)</code></td></tr>
+      <tr><td>Unidade distribuída</td><td>o rank (processo)</td><td>a região <code>target</code> (tarefa)</td></tr>
+      <tr><td>Restrição dura</td><td>—</td><td>só <strong>arrays POD</strong> cruzam a fronteira</td></tr>
+    </tbody>
+  </table></div>
+  <p>A última linha moldou todo o projeto: dentro de um <code>target</code> não passam <code>std::vector</code>, <code>std::complex</code>, casacore, FFTW nem <code>std::cout</code>. Por isso o pipeline foi partido em duas peças — leitura do MS fora, cálculo distribuído dentro:</p>
+  <div class="flow">
+    <div class="b"><p class="t">ms_export</p><p class="d">seu PC · casacore<br>MS → .vis por canal</p></div>
+    <div class="a">→</div>
+    <div class="b hl"><p class="t">ddfacet_ompc</p><p class="d">container · clang<br>zero dependências</p></div>
+    <div class="a">→</div>
+    <div class="b"><p class="t">FITS</p><p class="d">dirty + modelo</p></div>
+  </div>
+  <p>E dentro do <code>ddfacet_ompc</code>, cada ciclo maior do Algoritmo 1 faz:</p>
+  <div class="flow">
+    <div class="b"><p class="t">FFT(modelo)</p><p class="d">host</p></div>
+    <div class="a">→</div>
+    <div class="b hl"><p class="t">target × N canais</p><p class="d">degrid → residual → grid<br><strong>nós remotos</strong></p></div>
+    <div class="a">→</div>
+    <div class="b"><p class="t">Σ + FFT⁻¹</p><p class="d">host</p></div>
+    <div class="a">→</div>
+    <div class="b"><p class="t">CLEAN</p><p class="d">host</p></div>
+  </div>
+  <div class="note ok"><b>Por que o canal é a unidade certa.</b> Cada canal espectral tem a própria frequência e é processado de forma independente até a soma das grades — exatamente o desenho <em>“num_channel = 1 per archi. node”</em> dos slides do laboratório. O <code>sim_large.ms</code> tem <strong>4 canais</strong> (140–143 MHz), então há 4 unidades de trabalho reais.</div>
+</section>
+
+<section id="dados">
+  <h2><span class="n">01</span> Preparar os dados</h2>
+  <p class="sub">O container não tem casacore, então o MS é convertido antes, no seu PC.</p>
+  <span class="where pc">no seu PC · WSL</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">WSL · bash</span></div>
+<pre><span class="c"># compila o exportador (host: precisa de casacore)</span>
+g++ -std=c++17 -O2 -Iinclude -isystem /usr/include/casacore \
+    tools/ms_export.cpp src/ms_io.cpp \
+    -lcasa_ms -lcasa_tables -lcasa_casa -o build/ms_export
+
+<span class="c"># exporta 1 arquivo .vis por canal (400 mil linhas para o teste)</span>
+./build/ms_export ../data/sim_large.ms/sim_large.ms data/large 400000</pre></div>
+  <div class="out">canal 0:   400000 vis | 140.000 MHz | u_max 29071.4 lambda -&gt; data/large_ch0.vis
+canal 1:   400000 vis | 141.000 MHz | u_max 29279.0 lambda -&gt; data/large_ch1.vis
+canal 2:   400000 vis | 142.000 MHz | u_max 29486.7 lambda -&gt; data/large_ch2.vis
+canal 3:   400000 vis | 143.000 MHz | u_max 29694.3 lambda -&gt; <b>data/large_ch3.vis</b></div>
+  <p class="muted" style="font-size:.9rem">Repare que o <code>u_max</code> <strong>cresce com o canal</strong>: a linha de base física é a mesma, mas em frequência maior ela vale mais comprimentos de onda. É por isso que cada canal precisa da sua própria frequência — usar a do canal 0 para todos erraria as coordenadas UV em ~2%.</p>
+  <div class="note"><b>Se o MS não abrir.</b> O zip do dataset cria uma pasta aninhada: o MS de verdade fica em <code>data/sim_large.ms/sim_large.ms/</code>, não em <code>data/sim_large.ms/</code>.</div>
+</section>
+
+<section id="enviar">
+  <h2><span class="n">02</span> Enviar para o cluster</h2>
+  <p class="sub">Três níveis: seu PC → gateway → sorgan. E o destino tem de ser o <code>/scratch</code>.</p>
+  <span class="where pc">no seu PC · PowerShell</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">PowerShell</span></div>
+<pre>scp -P 6868 -r ddfacet_cpp thiago.pinto@ssh.lsc.ic.unicamp.br:/tmp/</pre></div>
+  <span class="where cl">no gateway</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">gateway</span></div>
+<pre>scp -r /tmp/ddfacet_cpp sorgan:/scratch/$(whoami)/</pre></div>
+  <div class="note"><b>Por que não deixar no <code>/tmp</code>.</b> O <code>/tmp</code> é local de cada máquina — o sorgan e os nós de computação não enxergam o <code>/tmp</code> do gateway, e ele é limpo periodicamente. O <code>/scratch</code> é o que fica visível para todos os nós.</div>
+  <p>Leve junto os <code>.vis</code> (~51 MB nos 4 canais). Sem eles o programa não roda.</p>
+</section>
+
+<section id="build">
+  <h2><span class="n">03</span> Alocar nós e compilar no container</h2>
+  <p class="sub">O clang do OMPC só existe dentro do container — e ele deve ser baixado de um nó de computação.</p>
+  <span class="where cl">no sorgan</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">sorgan</span></div>
+<pre><span class="c"># reserva 2 nós (anote os nomes que ele imprimir)</span>
+salloc -N 2 -p cpu --no-shell --exclusive --time 01:00:00
+
+<span class="c"># entra num dos nós alocados</span>
+ssh sorgan-cpu1
+cd /scratch/$(whoami)/ddfacet_cpp</pre></div>
+  <span class="where cl">no nó de computação</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">sorgan-cpuN</span></div>
+<pre><span class="c"># baixa o container do OpenMP Cluster (uma vez só)</span>
+./scripts/sorgan_ompc.sh setup
+
+<span class="c"># compila com o clang patched, de dentro do container</span>
+./scripts/sorgan_ompc.sh build</pre></div>
+  <p>O que o <code>build</code> executa por baixo — vale saber para explicar:</p>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">o comando real</span></div>
+<pre>apptainer exec --nv ompc_latest.sif \
+  clang++ -O2 -std=c++17 -fopenmp \
+          <span class="k">-fopenmp-targets=x86_64-pc-linux-gnu</span> \
+          -Iinclude src/main_ompc.cpp -o ddfacet_ompc</pre></div>
+  <p>A flag destacada é a chave: ela diz que o <em>device</em> de offload é <strong>outra máquina x86</strong> — não uma GPU. É isso que faz o OMPC despachar as regiões <code>target</code> pela rede.</p>
+  <div class="note"><b>Se o container tiver outro nome.</b> O <code>pull</code> costuma gerar <code>ompc_latest.sif</code>, mas o tutorial do laboratório menciona <code>mpp.sif</code>. Confira com <code>ls *.sif</code> e, se preciso, <code>export SIF=&lt;nome&gt;.sif</code> antes de rodar o script.</div>
+</section>
+
+<section id="rodar">
+  <h2><span class="n">04</span> Rodar — e a prova de que está correto</h2>
+  <p class="sub">O comando tem dois grupos de processos; entender isso é metade da explicação.</p>
+  <span class="where cl">no nó de computação</span>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">execução distribuída</span></div>
+<pre>ml load mpich
+
+mpirun -hosts=sorgan-cpu1,sorgan-cpu2 \
+   -np 2 apptainer exec --sharens --nv ompc_latest.sif <span class="k">llvm-offload-mpi-proxy-device</span> \
+ : -np 1 apptainer exec --sharens --nv ompc_latest.sif <span class="k">./ddfacet_ompc data/large 128 3 4</span></pre></div>
+  <p>São <strong>N + 1</strong> processos: N <em>proxy-devices</em> (os nós que executam as regiões <code>target</code>) e 1 <em>head</em> (que roda o programa e cria as tarefas). O <code>:</code> separa os dois grupos — é lançamento MPMD.</p>
+
+  <h3>O sinal de que o offload funcionou</h3>
+  <div class="out">[HEAD] pid=<b>4021</b>
+[WORKER] ciclo 0 canal 0  pid=<b>7734</b>
+[WORKER] ciclo 0 canal 1  pid=<b>7735</b>
+[WORKER] ciclo 0 canal 2  pid=<b>9182</b>
+[WORKER] ciclo 0 canal 3  pid=<b>9183</b></div>
+  <p><strong>PIDs diferentes do HEAD</strong> = as regiões <code>target</code> executaram em processos remotos. Se todos vierem com o mesmo PID do head, o offload não subiu e o código caiu para execução local — aí o problema é de toolchain, não do pipeline.</p>
+
+  <h3>O teste de invariância (é isto que prova a corretude)</h3>
+  <div class="term"><div class="bar"><span class="dot"></span><span class="lbl">sorgan-cpuN</span></div>
+<pre>./scripts/sorgan_ompc.sh check sorgan-cpu1,sorgan-cpu2</pre></div>
+  <p>Ele roda com 1 nó e com N nós e compara os checksums. <strong>Têm de ser idênticos.</strong> A lógica: distribuir só reparte os canais; a soma das grades UV parciais é a mesma soma, e soma é associativa. Se os checksums divergirem, algum canal foi perdido, duplicado ou houve corrida.</p>
+</section>
+
+<section id="mostrar">
+  <h2><span class="n">05</span> O que mostrar ao orientador</h2>
+  <p class="sub">Ele avalia paralelização — então a ordem é: corretude, depois desempenho.</p>
+
+  <div class="keyfacts">
+    <div><p class="k">Canais (nós)</p><p class="val">4</p></div>
+    <div><p class="k">Visibilidades</p><p class="val">1,6 M</p></div>
+    <div><p class="k">Tempo em <code>target</code></p><p class="val">99,4%</p></div>
+    <div><p class="k">Checksum</p><p class="val">idêntico</p></div>
+  </div>
+
+  <h3>1. Corretude antes de velocidade</h3>
+  <p>Mostre o <code>check</code>: a imagem final é a mesma com 1 nó e com N nós (checksum <code>6.851498</code> nos testes locais com 1, 2 e 4 unidades). Um speedup sem corretude não vale nada, e essa é a primeira pergunta que um orientador de paralelismo faz.</p>
+
+  <h3>2. A fração paralela — o número mais forte</h3>
+  <p><strong>99,4% do tempo dentro das regiões <code>target</code></strong> — a fração serial (FFT do modelo, soma das grades, FFT⁻¹ e CLEAN, todos no host) é de apenas ~0,6%. O trabalho por canal é grosso e o que volta ao host é só a grade final.</p>
+  <div class="note"><b>Não anuncie um teto de speedup a partir desse número.</b> Os 99,4% foram medidos com as regiões <code>target</code> executando <em>localmente</em>, onde as cláusulas <code>map()</code> não pagam rede. No cluster, a transferência das grades entre nós é real e entra na conta. O honesto é apresentar a <strong>fração serial medida</strong> (~0,6%) e, ao lado, o <strong>speedup real medido no cluster</strong> — que sai dos tempos do <code>run</code>.</div>
+
+  <h3>3. A convergência do algoritmo</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Ciclo maior</th><th>máx do resíduo</th><th>soma do resíduo</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td class="num">0,00768</td><td class="num">4,240</td></tr>
+      <tr><td>1</td><td class="num">0,00333</td><td class="num">0,025</td></tr>
+      <tr><td>2</td><td class="num">0,00234</td><td class="num">−0,516</td></tr>
+    </tbody>
+  </table></div>
+  <p>O resíduo cai a cada ciclo — o CLEAN está de fato removendo emissão e o pipeline converge. Isso mostra que não é só “rodar rápido”: o algoritmo está certo.</p>
+
+  <h3>4. As decisões de projeto (o que ele vai perguntar)</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Decisão</th><th>Por quê</th></tr></thead>
+    <tbody>
+      <tr><td>Canal como unidade de distribuição</td><td>Canais são independentes até a soma das grades; cada um tem frequência própria. Casa com o desenho do laboratório (1 canal por nó).</td></tr>
+      <tr><td>degrid+residual+grid fundidos</td><td>Uma única passada pelas visibilidades: a visibilidade predita nunca volta pela rede, o que reduz o tráfego entre nós (o custo dominante no OMPC).</td></tr>
+      <tr><td>Leitura do MS fora do <code>target</code></td><td>Casacore não existe no container e não é mapeável. Exportar para <code>.vis</code> POD resolve, e ainda evita reparsear tabelas em cada execução.</td></tr>
+      <tr><td>FFT própria (radix-2)</td><td>Não depender de FFTW, que pode não estar no container. Custo: exige imagem com lado potência de 2.</td></tr>
+      <tr><td>Grade de saída por canal</td><td>Cada tarefa escreve na sua própria grade → sem corrida entre tarefas; a soma acontece no host.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><b>Seja honesto sobre o limite atual.</b> A imagem ainda não é cientificamente boa: o teste usa 400 mil das 7,8 milhões de linhas, 128 píxeis, sem W-projection e com kernel gaussiano, num campo de 8° com 1.895 fontes. Para comparar de verdade com a imagem de referência <code>img_wproj_large_I.fits</code> faltam W-projection e faceting. O que está fechado e medido é a <strong>paralelização</strong> — que é o objeto da avaliação.</div>
+</section>
+
+<footer>
+  <span>DDFacet C++ · PIBIC · Tutorial OMPC</span>
+  <span>sorgan · cl3t0/ompc · MS sim_large (4 canais)</span>
+</footer>
+</div>
