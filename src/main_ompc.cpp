@@ -1,31 +1,31 @@
 /**
  * @file main_ompc.cpp
- * @brief DDFacet (Algoritmo 1) sobre OpenMP Cluster — ciclo completo.
+ * @brief DDFacet (Algorithm 1) on OpenMP Cluster - full major-cycle loop.
  *
- * ─── O que este programa faz ─────────────────────────────────────────────────
- * Roda os ciclos maiores do DDFacet distribuindo o trabalho POR CANAL entre os
- * nós do cluster, via `#pragma omp target`. Cada canal é uma unidade de trabalho
- * independente (frequência própria) — o desenho "num_channel = 1 per archi.node".
+ * --- What this program does -------------------------------------------------
+ * Runs the DDFacet major cycles, distributing the work BY CHANNEL across the
+ * cluster nodes via `#pragma omp target`. Each channel is an independent unit
+ * of work with its own frequency - the "num_channel = 1 per archi. node" layout.
  *
- *   HOST                    TARGET (um por canal, em nós distintos)      HOST
- *   ────                    ────────────────────────────────────────     ────
- *   FFT(modelo) ──map(to)──► degrid → residual → grid ──map(from)──► Σ canais
- *                                                                    → FFT⁻¹
- *                                                                    → CLEAN
- *                                                                    ↺ próximo ciclo
+ *   HOST                    TARGET (one per channel, on distinct nodes)  HOST
+ *   ----                    ----------------------------------------     ----
+ *   FFT(model) ---map(to)--> degrid -> residual -> grid ---map(from)---> sum
+ *                                                                    -> FFT-1
+ *                                                                    -> CLEAN
+ *                                                                    repeat
  *
- * ─── Duas restrições do container OMPC que moldaram o projeto ────────────────
- * 1. NÃO há casacore. Por isso a leitura do MS é feita fora, por `tools/ms_export`,
- *    que gera um arquivo .vis por canal (POD puro). Aqui só se faz fread.
- * 2. NÃO se pode contar com FFTW. Por isso a FFT é própria (radix-2 iterativa),
- *    sem dependência externa. Exige dimensões potência de 2.
+ * --- Two container constraints that shaped this design ----------------------
+ * 1. There is NO casacore. MS reading happens outside, in `tools/ms_export`,
+ *    which writes one .vis file per channel (plain POD). Here we only fread.
+ * 2. FFTW cannot be assumed either, so the FFT is in-tree (iterative radix-2)
+ *    with no external dependency. It requires power-of-two dimensions.
  *
- * ─── Uso ─────────────────────────────────────────────────────────────────────
- *    ./ddfacet_ompc <prefixo_vis> [npix] [ciclos] [nchan]
- *    ex.: ./ddfacet_ompc data/large 256 5 4
- *         lê data/large_ch0.vis .. _ch3.vis, imagem 256², 5 ciclos maiores
+ * --- Usage ------------------------------------------------------------------
+ *    ./ddfacet_ompc <vis_prefix> [npix] [cycles] [nchan]
+ *    e.g.: ./ddfacet_ompc data/large 256 5 4
+ *         reads data/large_ch0.vis .. _ch3.vis, 256x256 image, 5 major cycles
  *
- * Saída: dirty_ompc.fits (imagem suja) e model_ompc.fits (modelo CLEAN).
+ * Output: dirty_ompc.fits (dirty image) and model_ompc.fits (CLEAN model).
  */
 #include "ompc_kernel.h"
 
@@ -39,12 +39,12 @@
 #include <algorithm>
 #include <unistd.h>
 
-/* ─── Parâmetros do kernel de gridding (iguais ao pipeline principal) ──────── */
+/* --- Gridding kernel parameters ------------------------------------------ */
 static const int    KERNEL_W  = 5;
 static const double KERNEL_SG = 1.0;
 static const double ARCSEC    = 4.8481368110953599e-06;
 
-/* ═══════════════════════ 1. Leitura dos arquivos .vis ═══════════════════════ */
+/* ======================= 1. Reading the .vis files ======================== */
 
 struct CanalVis {
     int    channel = 0;
@@ -56,25 +56,25 @@ struct CanalVis {
     std::vector<unsigned char> flag;
 };
 
-/** @brief Carrega um .vis gerado por tools/ms_export (ver formato lá). */
+/** @brief Load a .vis file written by tools/ms_export. */
 static bool carregar_vis(const std::string& fn, CanalVis& c) {
     std::FILE* f = std::fopen(fn.c_str(), "rb");
-    if (!f) { std::fprintf(stderr, "[erro] nao abri '%s'\n", fn.c_str()); return false; }
+    if (!f) { std::fprintf(stderr, "[error] could not open '%s'\n", fn.c_str()); return false; }
 
     char magic[8] = {0};
     std::int32_t nvis = 0, ch = 0;
     if (std::fread(magic, 1, 8, f) != 8 || std::memcmp(magic, "DDFVIS01", 8) != 0) {
-        std::fprintf(stderr, "[erro] '%s' nao e um arquivo DDFVIS01\n", fn.c_str());
+        std::fprintf(stderr, "[error] '%s' is not a DDFVIS01 file\n", fn.c_str());
         std::fclose(f); return false;
     }
-    /* Um .vis truncado daria lixo silencioso — cada leitura é conferida. */
+    /* A truncated .vis would silently yield garbage - check every read. */
     std::size_t lidos = 0;
     lidos += std::fread(&nvis,      sizeof(std::int32_t), 1, f);
     lidos += std::fread(&ch,        sizeof(std::int32_t), 1, f);
     lidos += std::fread(&c.freq_hz, sizeof(double),       1, f);
     lidos += std::fread(&c.umax_wl, sizeof(double),       1, f);
     if (lidos != 4 || nvis <= 0) {
-        std::fprintf(stderr, "[erro] cabecalho invalido em '%s' (nvis=%d)\n", fn.c_str(), nvis);
+        std::fprintf(stderr, "[error] invalid header in '%s' (nvis=%d)\n", fn.c_str(), nvis);
         std::fclose(f); return false;
     }
 
@@ -94,15 +94,15 @@ static bool carregar_vis(const std::string& fn, CanalVis& c) {
 
     const bool ok = (got == 6 * n) && (std::ferror(f) == 0);
     if (!ok)
-        std::fprintf(stderr, "[erro] '%s' truncado: li %zu de %zu elementos\n",
+        std::fprintf(stderr, "[error] '%s' truncated: read %zu of %zu elements\n",
                      fn.c_str(), got, 6 * n);
     std::fclose(f);
     return ok;
 }
 
-/* ═══════════════════════ 2. FFT própria (sem FFTW) ═════════════════════════ */
+/* ===================== 2. In-tree FFT (no FFTW) ========================== */
 
-/** @brief FFT 1-D radix-2 iterativa, in-place. sinal=-1 direta, +1 inversa. */
+/** @brief Iterative radix-2 1-D FFT, in place. sign=-1 forward, +1 inverse. */
 static void fft1d(float* re, float* im, int n, int sinal) {
     /* bit-reversal */
     for (int i = 1, j = 0; i < n; ++i) {
@@ -133,7 +133,7 @@ static void fft1d(float* re, float* im, int n, int sinal) {
     if (sinal > 0) for (int i = 0; i < n; ++i) { re[i] /= n; im[i] /= n; }
 }
 
-/** @brief FFT 2-D separável (linhas depois colunas). n deve ser potência de 2. */
+/** @brief Separable 2-D FFT (rows then columns). n must be a power of two. */
 static void fft2d(std::vector<float>& re, std::vector<float>& im, int nx, int ny, int sinal) {
     std::vector<float> lr(nx), li(nx);
     for (int j = 0; j < ny; ++j) {
@@ -149,7 +149,7 @@ static void fft2d(std::vector<float>& re, std::vector<float>& im, int nx, int ny
     }
 }
 
-/** @brief Troca os quadrantes (fftshift), levando a origem ao centro e vice-versa. */
+/** @brief Swap quadrants (fftshift): moves the origin to the centre. */
 static void fftshift(std::vector<float>& a, int nx, int ny) {
     std::vector<float> t(a.size());
     const int hx = nx / 2, hy = ny / 2;
@@ -159,7 +159,7 @@ static void fftshift(std::vector<float>& a, int nx, int ny) {
     a.swap(t);
 }
 
-/* ═══════════════════════ 3. Escrita FITS (sem dependências) ════════════════ */
+/* ==================== 3. FITS output (no dependencies) =================== */
 
 static bool escrever_fits(const char* fn, const std::vector<float>& img, int nx, int ny) {
     std::FILE* f = std::fopen(fn, "wb");
@@ -195,13 +195,13 @@ static bool escrever_fits(const char* fn, const std::vector<float>& img, int nx,
     return true;
 }
 
-/* ═══════════════════════════════ 4. main ═══════════════════════════════════ */
+/* ================================ 4. main ================================ */
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "uso: %s <prefixo_vis> [npix] [ciclos] [nchan]\n"
-            "  ex: %s data/large 256 5 4\n", argv[0], argv[0]);
+            "usage: %s <vis_prefix> [npix] [cycles] [nchan]\n"
+            "  e.g. %s data/large 256 5 4\n", argv[0], argv[0]);
         return 1;
     }
     const std::string prefixo = argv[1];
@@ -211,16 +211,16 @@ int main(int argc, char** argv) {
 
     /* a FFT radix-2 exige potência de 2 */
     if (npix & (npix - 1)) {
-        std::fprintf(stderr, "[erro] npix deve ser potencia de 2 (recebi %d)\n", npix);
+        std::fprintf(stderr, "[error] npix must be a power of two (got %d)\n", npix);
         return 1;
     }
 
     std::printf("========================================================\n");
-    std::printf("  DDFacet OMPC — ciclo completo, distribuido por CANAL\n");
+    std::printf("  DDFacet OMPC - full cycle, distributed BY CHANNEL\n");
     std::printf("  [HEAD] pid=%d\n", getpid());
     std::printf("========================================================\n");
 
-    /* ── Carrega um .vis por canal ─────────────────────────────────────────── */
+    /* -- Load one .vis per channel ----------------------------------------- */
     std::vector<CanalVis> canais(nchan);
     double umax_global = 0.0;
     for (int c = 0; c < nchan; ++c) {
@@ -228,26 +228,25 @@ int main(int argc, char** argv) {
         std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefixo.c_str(), c);
         if (!carregar_vis(fn, canais[c])) return 1;
         if (canais[c].umax_wl > umax_global) umax_global = canais[c].umax_wl;
-        std::printf("  canal %d: %8d vis | %.3f MHz | u_max %.1f lambda\n",
+        std::printf("  channel %d: %8d vis | %.3f MHz | u_max %.1f lambda\n",
                     c, canais[c].nvis, canais[c].freq_hz / 1e6, canais[c].umax_wl);
     }
 
-    /* cell derivado do maior u_max (amostragem de Nyquist com folga 3x) */
+    /* cell size from the largest u_max (Nyquist with a 3x margin) */
     const double cell = 1.0 / (3.0 * umax_global);
     const int    nx = npix, ny = npix;
     const size_t ng = (size_t)nx * ny;
-    std::printf("  imagem : %dx%d  cell=%.4f arcsec  ciclos=%d\n",
+    std::printf("  image  : %dx%d  cell=%.4f arcsec  cycles=%d\n",
                 nx, ny, cell / ARCSEC, nciclo);
 
-    /* ── Centro de fase da faceta ─────────────────────────────────────────────
-     * Por padrão a faceta fica na origem (l0=m0=0). Nesse caso n0 = 1 e o
-     * TERMO-W se anula — por construção, não por omissão: o termo w·(n0−1)
-     * aparece no DESLOCAMENTO de centro de fase, e uma faceta centrada não tem
-     * deslocamento nenhum.
+    /* -- Facet phase centre --------------------------------------------------
+     * By default the facet sits at the origin (l0=m0=0), so n0 = 1 and the
+     * W-TERM vanishes - by construction, not by omission: the w*(n0-1) term
+     * lives in the phase-centre SHIFT, and a centred facet has no shift.
      *
-     * DDF_OFFSET=<pixels> desloca o centro de fase, tornando o termo-w atuante
-     * (é o que acontece em cada faceta fora do centro num imageamento faceteado).
-     * DDF_NOW=1 zera o termo-w, permitindo o comparativo lado a lado.        */
+     * DDF_OFFSET=<pixels> moves the phase centre, making the w-term active
+     * (what happens to every off-centre facet in a faceted imaging run).
+     * DDF_NOW=1 zeroes the w-term, enabling a side-by-side comparison.     */
     double off_pix = 0.0;
     if (const char* e = std::getenv("DDF_OFFSET")) off_pix = std::atof(e);
     const double l0  = off_pix * cell;
@@ -255,31 +254,31 @@ int main(int argc, char** argv) {
     const double lm2 = l0 * l0 + m0 * m0;
     const bool   use_w = (std::getenv("DDF_NOW") == nullptr);
     const double n0m1 = (use_w && lm2 < 1.0) ? (std::sqrt(1.0 - lm2) - 1.0) : 0.0;
-    /* ── DDE: ganho complexo dependente da direção ────────────────────────────
-     * Versão escalar do formalismo RIME/Jones. Aplicado como ×G no degrid e
-     * ×conj(G) no operador adjunto (dentro do kernel), o que preserva a relação
-     * adjunta. Identidade (1,0) por padrão → sem efeito.
-     * DDF_DDE=1 ativa um G DETERMINÍSTICO, função apenas de (l0,m0): tem de ser
-     * determinístico, senão cada nó geraria um valor diferente e o resultado
-     * passaria a depender de quantos nós rodaram.                            */
+    /* -- DDE: direction-dependent complex gain -------------------------------
+     * Scalar form of the RIME/Jones formalism. Applied as xG in the degrid
+     * and xconj(G) in the adjoint (inside the kernel), which preserves the
+     * adjoint relation. Identity (1,0) by default, i.e. no effect.
+     * DDF_DDE=1 enables a DETERMINISTIC G, a function of (l0,m0) alone: it
+     * must be deterministic, otherwise each node would generate a different
+     * value and the result would depend on how many nodes ran.            */
     double gain_re = 1.0, gain_im = 0.0;
     const bool use_dde = (std::getenv("DDF_DDE") != nullptr);
     if (use_dde) {
         const double r   = std::sqrt(lm2);
-        const double amp = 1.0 / (1.0 + 40.0 * r * r);   /* análogo ao beam primário */
-        const double pha = 150.0 * r;                     /* análogo a erro de fase   */
+        const double amp = 1.0 / (1.0 + 40.0 * r * r);   /* primary-beam analogue    */
+        const double pha = 150.0 * r;                     /* phase-error analogue     */
         gain_re = amp * std::cos(pha);
         gain_im = amp * std::sin(pha);
     }
 
-    std::printf("  fase   : offset=%.0f px  l0=%.3e m0=%.3e  termo-w n0-1=%.6e %s\n",
-                off_pix, l0, m0, n0m1, use_w ? "" : "[DDF_NOW: DESLIGADO]");
+    std::printf("  phase  : offset=%.0f px  l0=%.3e m0=%.3e  w-term n0-1=%.6e %s\n",
+                off_pix, l0, m0, n0m1, use_w ? "" : "[DDF_NOW: w-term OFF]");
     std::printf("  DDE    : |G|=%.6f  arg(G)=%.6f rad %s\n",
                 std::sqrt(gain_re * gain_re + gain_im * gain_im),
                 std::atan2(gain_im, gain_re),
-                use_dde ? "" : "[identidade — use DDF_DDE=1]");
+                use_dde ? "" : "[identity - set DDF_DDE=1]");
 
-    /* ── PSF (dirty beam): grade das visibilidades unitárias, no host ──────── */
+    /* -- PSF (dirty beam): grid of unit visibilities, on the host ---------- */
     std::vector<float> psf_re(ng, 0.0f), psf_im(ng, 0.0f);
     {
         std::vector<float> um_re, um_im;
@@ -287,7 +286,7 @@ int main(int argc, char** argv) {
         for (int c = 0; c < nchan; ++c) {
             const CanalVis& k = canais[c];
             um_re.assign(k.nvis, 1.0f); um_im.assign(k.nvis, 0.0f);
-            /* modelo zerado → δv = v = 1 → grid(1) = PSF */
+            /* zero model -> dv = v = 1 -> grid(1) = PSF */
             ompc_degrid_residual_grid(k.u.data(), k.v.data(), k.w.data(),
                                       um_re.data(), um_im.data(), k.flag.data(), k.nvis,
                                       zmdl_re.data(), zmdl_im.data(),
@@ -302,11 +301,11 @@ int main(int argc, char** argv) {
     float beam_peak = 0.0f;
     for (size_t i = 0; i < ng; ++i) if (psf_re[i] > beam_peak) beam_peak = psf_re[i];
     if (beam_peak <= 0.0f) beam_peak = 1.0f;
-    std::printf("  PSF    : pico S = %.6g\n", (double)beam_peak);
+    std::printf("  PSF    : peak S = %.6g\n", (double)beam_peak);
 
-    /* ── Estado do pipeline ────────────────────────────────────────────────── */
-    std::vector<float> modelo(ng, 0.0f);                 /* imagem modelo (real) */
-    std::vector<float> dirty0;                            /* dirty do 1o ciclo   */
+    /* -- Pipeline state ---------------------------------------------------- */
+    std::vector<float> modelo(ng, 0.0f);                 /* model image (real)   */
+    std::vector<float> dirty0;                            /* dirty of cycle 0     */
     std::vector<std::vector<float> > GR(nchan), GI(nchan);
     for (int c = 0; c < nchan; ++c) { GR[c].assign(ng, 0.0f); GI[c].assign(ng, 0.0f); }
 
@@ -314,9 +313,9 @@ int main(int argc, char** argv) {
     double t_offload = 0.0;
 
     for (int ciclo = 0; ciclo < nciclo; ++ciclo) {
-        std::printf("\n=== CICLO MAIOR %d ===\n", ciclo);
+        std::printf("\n=== MAJOR CYCLE %d ===\n", ciclo);
 
-        /* (a) HOST: FFT do modelo -> grade UV do modelo */
+        /* (a) HOST: FFT of the model -> model UV grid */
         std::vector<float> mdl_re(modelo), mdl_im(ng, 0.0f);
         fftshift(mdl_re, nx, ny); fftshift(mdl_im, nx, ny);
         fft2d(mdl_re, mdl_im, nx, ny, -1);
@@ -327,7 +326,7 @@ int main(int argc, char** argv) {
             std::fill(GI[c].begin(), GI[c].end(), 0.0f);
         }
 
-        /* (b) OFFLOAD: uma tarefa `target` por canal → nós distintos */
+        /* (b) OFFLOAD: one `target` task per channel -> distinct nodes */
         const double t0 = omp_get_wtime();
         #pragma omp parallel
         #pragma omp single
@@ -346,18 +345,17 @@ int main(int argc, char** argv) {
                 float*         gip = GI[c].data();
                 const int      ngi = (int)ng;
 
-                /* Forma canônica do OpenMP Cluster: `target nowait` + `depend`.
-                 * É assim que o runtime do OMPC identifica as regiões como
-                 * tarefas independentes e as despacha para nós distintos — o
-                 * `depend(out:)` sobre a grade de saída declara a dependência de
-                 * dados que ele usa para o escalonamento.
+                /* Canonical OpenMP Cluster form: `target nowait` + `depend`.
+                 * This is how the OMPC runtime recognises the regions as
+                 * independent tasks and dispatches them to distinct nodes: the
+                 * `depend(out:)` on the output grid declares the data
+                 * dependency it schedules on.
                  *
-                 * Nota sobre execução local: o g++, sem device de offload,
-                 * executa a região inline e as tarefas saem sequenciais. Isso é
-                 * limitação do fallback de host (o `nowait` PERMITE execução
-                 * diferida, não obriga), não do código — sob OMPC cada canal vai
-                 * para um nó. Para medir paralelismo na máquina local, use o
-                 * caminho MPI (build/ddfacet_mpi). */
+                 * Note on local runs: g++ has no offload device, so it executes
+                 * the region inline and the tasks end up sequential. That is a
+                 * host-fallback limitation (`nowait` PERMITS deferred execution,
+                 * it does not require it), not a property of this code - under
+                 * OMPC each channel goes to a node. */
                 #pragma omp target nowait                                       \
                     depend(out: grp[0:ngi])                                     \
                     map(to: up[0:nv], vp[0:nv], wp[0:nv],                       \
@@ -365,7 +363,7 @@ int main(int argc, char** argv) {
                             mrp[0:ngi], mip[0:ngi])                             \
                     map(tofrom: grp[0:ngi], gip[0:ngi])
                 {
-                    printf("[WORKER] ciclo %d canal %d  pid=%d\n", ciclo, c, getpid());
+                    printf("[WORKER] cycle %d channel %d  pid=%d\n", ciclo, c, getpid());
                     ompc_degrid_residual_grid(up, vp, wp, vrp, vip, fp, nv,
                                               mrp, mip, grp, gip,
                                               nx, ny, cell, l0, m0, n0m1,
@@ -376,12 +374,12 @@ int main(int argc, char** argv) {
         }
         t_offload += omp_get_wtime() - t0;
 
-        /* (c) HOST: soma as grades dos canais (o papel do all-reduce) */
+        /* (c) HOST: sum the per-channel grids (the all-reduce role) */
         std::vector<float> sre(ng, 0.0f), sim(ng, 0.0f);
         for (int c = 0; c < nchan; ++c)
             for (size_t i = 0; i < ng; ++i) { sre[i] += GR[c][i]; sim[i] += GI[c][i]; }
 
-        /* (d) HOST: FFT⁻¹ -> imagem residual suja */
+        /* (d) HOST: inverse FFT -> dirty residual image */
         fftshift(sre, nx, ny); fftshift(sim, nx, ny);
         fft2d(sre, sim, nx, ny, +1);
         fftshift(sre, nx, ny); fftshift(sim, nx, ny);
@@ -396,9 +394,9 @@ int main(int argc, char** argv) {
             if (dirty[i] > dmax) dmax = dirty[i];
             dsum += dirty[i];
         }
-        std::printf("  dirty  : min=%.6g max=%.6g soma=%.6g\n", dmin, dmax, dsum);
+        std::printf("  dirty  : min=%.6g max=%.6g sum=%.6g\n", dmin, dmax, dsum);
 
-        /* (e) HOST: CLEAN de Högbom — subtrai o beam no pico, N vezes */
+        /* (e) HOST: Hogbom CLEAN - subtract the beam at the peak, N times */
         const int    nminor = 200;
         const double ganho  = 0.1;
         int    pkx = 0, pky = 0;
@@ -412,7 +410,7 @@ int main(int argc, char** argv) {
             if (fabsf(pv) < 1e-9f) break;
             const float delta = (float)(ganho * pv);
             modelo[(size_t)pky*nx+pkx] += delta;
-            /* subtrai a PSF centrada no pico */
+            /* subtract the PSF centred on the peak */
             const int cx = nx/2, cy = ny/2;
             for (int j = 0; j < ny; ++j) {
                 const int pj = j - pky + cy;
@@ -426,27 +424,27 @@ int main(int argc, char** argv) {
         }
         double msum = 0.0; float mmax = 0.0f;
         for (size_t i = 0; i < ng; ++i) { msum += modelo[i]; if (modelo[i]>mmax) mmax=modelo[i]; }
-        std::printf("  modelo : soma=%.6g pico=%.6g\n", msum, (double)mmax);
+        std::printf("  model  : sum=%.6g peak=%.6g\n", msum, (double)mmax);
     }
 
     const double t_tot = omp_get_wtime() - t_ini;
 
-    /* ── Saída ─────────────────────────────────────────────────────────────── */
+    /* -- Output ------------------------------------------------------------ */
     escrever_fits("dirty_ompc.fits", dirty0, nx, ny);
     escrever_fits("model_ompc.fits", modelo, nx, ny);
 
-    /* checksum: invariante — nao pode depender do numero de nos */
+    /* checksum: invariant - must not depend on the number of nodes */
     double chk = 0.0;
     for (size_t i = 0; i < ng; ++i) chk += fabs((double)dirty0[i]);
 
     std::printf("\n--------------------------------------------------------\n");
-    std::printf("  tempo total          : %.3f s\n", t_tot);
-    std::printf("  tempo nas tarefas    : %.3f s (%.1f%%)\n",
+    std::printf("  total time           : %.3f s\n", t_tot);
+    std::printf("  time in tasks        : %.3f s (%.1f%%)\n",
                 t_offload, 100.0 * t_offload / (t_tot > 0 ? t_tot : 1));
     std::printf("  checksum |dirty|     : %.6f\n", chk);
     std::printf("  FITS: dirty_ompc.fits, model_ompc.fits\n");
     std::printf("--------------------------------------------------------\n");
-    std::printf("  INVARIANTE: o checksum tem de ser IDENTICO com 1 no e\n");
-    std::printf("  com N nos. E a prova de que a distribuicao esta correta.\n");
+    std::printf("  INVARIANT: the checksum must be IDENTICAL with 1 node and\n");
+    std::printf("  with N nodes. That is the proof the distribution is correct.\n");
     return 0;
 }

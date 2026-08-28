@@ -1,9 +1,10 @@
 /**
  * @file ms_io.h
- * @brief Leitura de Measurement Sets (formato CASA) via casacore.
+ * @brief Measurement Set reading (CASA format) through casacore.
  *
- * Isola a dependência do casacore: só este módulo (ms_io.cpp) inclui os headers
- * do casacore. O resto do pipeline continua sem essa dependência.
+ * Isolates the casacore dependency: only ms_io.cpp includes its headers, so the
+ * rest of the tree stays free of it. This matters because the OMPC container
+ * does not ship casacore — MS reading happens on the host, in tools/ms_export.
  */
 #ifndef MS_IO_H
 #define MS_IO_H
@@ -14,44 +15,43 @@
 namespace ddfacet {
 
 /**
- * @brief Lê (uma faixa de linhas de) um Measurement Set para um VisibilitySet.
+ * @brief Read (a row range of) a Measurement Set into a VisibilitySet.
  *
- * Lê as colunas UVW (metros), DATA, FLAG e WEIGHT da tabela MAIN e a
- * frequência de referência (CHAN_FREQ[0]) da subtabela SPECTRAL_WINDOW.
- * Converte UVW de metros para comprimentos de onda (÷ wavelength).
+ * Reads UVW (metres), DATA, FLAG and WEIGHT from the MAIN table, and the
+ * channel frequency from SPECTRAL_WINDOW. UVW is converted from metres to
+ * wavelengths on the way out.
  *
- * A faixa [startrow, startrow+nrow) permite DISTRIBUIR um único MS grande entre
- * ranks MPI: cada rank lê apenas a sua fatia de visibilidades.
+ * The channel is explicit because each channel is an independent unit of work
+ * with its own frequency — the axis along which the pipeline is distributed.
+ * Note that the frequency used is CHAN_FREQ[channel]: changing channel changes
+ * the wavelength, and therefore the UVW conversion.
  *
- * O CANAL é um parâmetro explícito: cada canal é uma unidade de trabalho
- * independente (frequência própria), o que prepara a distribuição futura
- * "canal c → nó c" no OpenMP Cluster. Note que a frequência usada é
- * CHAN_FREQ[channel] — trocar de canal muda o comprimento de onda e, portanto,
- * a conversão UVW [m] → [λ].
+ * The [startrow, startrow + nrow) range allows a large MS to be read in
+ * slices rather than all at once.
  *
- * @param path      Caminho do diretório .ms
- * @param vis       VisibilitySet de saída (preenchido)
- * @param freq_out  Frequência do canal lido [Hz]
- * @param startrow  Primeira linha a ler (padrão 0)
- * @param nrow      Número de linhas (padrão -1 = da startrow até o fim)
- * @param channel   Índice do canal espectral a ler (padrão 0)
- * @return true em sucesso, false em erro (mensagem em std::cerr)
+ * @param path      path to the .ms directory
+ * @param vis       output, filled with the visibilities
+ * @param freq_out  frequency of the channel read [Hz]
+ * @param startrow  first row to read (default 0)
+ * @param nrow      number of rows (default -1 = to the end)
+ * @param channel   spectral channel index (default 0)
+ * @return true on success; false on error, with a message on std::cerr
  */
 bool read_ms(const std::string& path, VisibilitySet& vis, double& freq_out,
              long startrow = 0, long nrow = -1, int channel = 0);
 
 /**
- * @brief Lê apenas os metadados de um MS (sem carregar todas as visibilidades):
- * frequência, u_max em comprimentos de onda (para derivar o cell_size), e o
- * número total de linhas (para a distribuição MPI por faixa).
+ * @brief Read only an MS's metadata, without loading the visibilities:
+ * frequency, max |(u,v)| in wavelengths (to derive the cell size), and the
+ * total row count.
  *
- * @param path        Caminho do .ms
- * @param freq_out    Frequência do canal [Hz]
- * @param umax_wl_out max |(u,v)| em comprimentos de onda (no canal pedido)
- * @param nrows_out   número total de linhas do MS
- * @param channel     Índice do canal espectral (padrão 0)
- * @param nchan_out   (opcional) número total de canais do MS
- * @return true em sucesso
+ * @param path        path to the .ms
+ * @param freq_out    channel frequency [Hz]
+ * @param umax_wl_out max |(u,v)| in wavelengths, for the requested channel
+ * @param nrows_out   total number of rows in the MS
+ * @param channel     spectral channel index (default 0)
+ * @param nchan_out   optional: total number of channels in the MS
+ * @return true on success
  */
 bool read_ms_metadata(const std::string& path, double& freq_out,
                       double& umax_wl_out, long& nrows_out,

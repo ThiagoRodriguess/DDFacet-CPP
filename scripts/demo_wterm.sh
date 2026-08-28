@@ -1,10 +1,16 @@
 #!/bin/bash
-# Uso: ./scripts/demo_wterm.sh
+# Usage: ./scripts/demo_wterm.sh
+#
+# Shows the w-term's effect growing with distance from the phase centre.
+# At offset 0 the term is zero by construction (a centred facet has no phase
+# shift), so the two columns must agree exactly.
 set -u
-BIN=./build/ddfacet_ompc_host
-DAT=data/large
+BIN=${BIN:-./build/ddfacet_ompc}
+DAT=${DAT:-data/large}
 
-printf "  %-9s %-16s %-13s %-13s %s\n" "offset" "n0-1" "COM w" "SEM w" "dif"
+[ -x "$BIN" ] || { echo "build first: g++ -std=c++17 -O2 -fopenmp -Iinclude src/main_ompc.cpp -o $BIN"; exit 1; }
+
+printf "  %-9s %-16s %-13s %-13s %s\n" "offset" "n0-1" "WITH w" "WITHOUT w" "diff"
 echo "  ---------------------------------------------------------------------"
 
 for off in 0 40 200 1000 4000; do
