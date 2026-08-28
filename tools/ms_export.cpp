@@ -56,7 +56,7 @@
 using namespace ddfacet;
 
 /** @brief How many channels the MS has (SPECTRAL_WINDOW subtable). */
-static int contar_canais(const std::string& ms_path) {
+static int count_channels(const std::string& ms_path) {
     try {
         casacore::Table spw(ms_path + "/SPECTRAL_WINDOW");
         casacore::ArrayColumn<casacore::Double> cf(spw, "CHAN_FREQ");
@@ -68,7 +68,7 @@ static int contar_canais(const std::string& ms_path) {
 }
 
 /** @brief Write a VisibilitySet in the .vis format described above. */
-static bool gravar_vis(const std::string& fn, const VisibilitySet& vis,
+static bool write_vis(const std::string& fn, const VisibilitySet& vis,
                        int channel, double freq_hz, double umax_wl) {
     std::FILE* f = std::fopen(fn.c_str(), "wb");
     if (!f) { std::fprintf(stderr, "[ms_export] could not open '%s'\n", fn.c_str()); return false; }
@@ -114,10 +114,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::string ms_path = argv[1];
-    const std::string prefixo = argv[2];
-    const long max_linhas = (argc > 3) ? std::atol(argv[3]) : -1;
+    const std::string prefix = argv[2];
+    const long max_rows = (argc > 3) ? std::atol(argv[3]) : -1;
 
-    const int nchan = contar_canais(ms_path);
+    const int nchan = count_channels(ms_path);
     if (nchan <= 0) return 1;
 
     /* Channel 0 metadata: u_max suggests the cell size for the pipeline. */
@@ -126,12 +126,12 @@ int main(int argc, char** argv) {
     int nch_check = 0;
     if (!read_ms_metadata(ms_path, freq0, umax0, nrows, 0, &nch_check)) return 1;
 
-    const long nler = (max_linhas > 0 && max_linhas < nrows) ? max_linhas : nrows;
+    const long rows_to_read = (max_rows > 0 && max_rows < nrows) ? max_rows : nrows;
 
     std::printf("========================================================\n");
     std::printf("  ms_export - MS -> one .vis file per channel\n");
     std::printf("  MS      : %s\n", ms_path.c_str());
-    std::printf("  rows    : %ld (of %ld)\n", nler, nrows);
+    std::printf("  rows    : %ld (of %ld)\n", rows_to_read, nrows);
     std::printf("  channels: %d   (each becomes one OMPC unit of work)\n", nchan);
     std::printf("  u_max   : %.1f lambda  -> suggested cell %.4f arcsec\n",
                 umax0, (1.0 / (3.0 * umax0)) * 206264.806247);
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
     for (int c = 0; c < nchan; ++c) {
         VisibilitySet vis;
         double freq = 0.0;
-        if (!read_ms(ms_path, vis, freq, 0, nler, c)) {
+        if (!read_ms(ms_path, vis, freq, 0, rows_to_read, c)) {
             std::fprintf(stderr, "[ms_export] failed reading channel %d\n", c);
             return 1;
         }
@@ -152,8 +152,8 @@ int main(int argc, char** argv) {
         }
 
         char fn[1024];
-        std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefixo.c_str(), c);
-        if (!gravar_vis(fn, vis, c, freq, umax)) return 1;
+        std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefix.c_str(), c);
+        if (!write_vis(fn, vis, c, freq, umax)) return 1;
 
         std::printf("  channel %d: %8zu vis | %.3f MHz | u_max %.1f lambda -> %s\n",
                     c, vis.nvis, freq / 1e6, umax, fn);

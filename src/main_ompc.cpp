@@ -46,7 +46,7 @@ static const double ARCSEC    = 4.8481368110953599e-06;
 
 /* ======================= 1. Reading the .vis files ======================== */
 
-struct CanalVis {
+struct ChannelVis {
     int    channel = 0;
     double freq_hz = 0.0;
     double umax_wl = 0.0;
@@ -57,7 +57,7 @@ struct CanalVis {
 };
 
 /** @brief Load a .vis file written by tools/ms_export. */
-static bool carregar_vis(const std::string& fn, CanalVis& c) {
+static bool load_vis(const std::string& fn, ChannelVis& c) {
     std::FILE* f = std::fopen(fn.c_str(), "rb");
     if (!f) { std::fprintf(stderr, "[error] could not open '%s'\n", fn.c_str()); return false; }
 
@@ -68,12 +68,12 @@ static bool carregar_vis(const std::string& fn, CanalVis& c) {
         std::fclose(f); return false;
     }
     /* A truncated .vis would silently yield garbage - check every read. */
-    std::size_t lidos = 0;
-    lidos += std::fread(&nvis,      sizeof(std::int32_t), 1, f);
-    lidos += std::fread(&ch,        sizeof(std::int32_t), 1, f);
-    lidos += std::fread(&c.freq_hz, sizeof(double),       1, f);
-    lidos += std::fread(&c.umax_wl, sizeof(double),       1, f);
-    if (lidos != 4 || nvis <= 0) {
+    std::size_t nread = 0;
+    nread += std::fread(&nvis,      sizeof(std::int32_t), 1, f);
+    nread += std::fread(&ch,        sizeof(std::int32_t), 1, f);
+    nread += std::fread(&c.freq_hz, sizeof(double),       1, f);
+    nread += std::fread(&c.umax_wl, sizeof(double),       1, f);
+    if (nread != 4 || nvis <= 0) {
         std::fprintf(stderr, "[error] invalid header in '%s' (nvis=%d)\n", fn.c_str(), nvis);
         std::fclose(f); return false;
     }
@@ -103,7 +103,7 @@ static bool carregar_vis(const std::string& fn, CanalVis& c) {
 /* ===================== 2. In-tree FFT (no FFTW) ========================== */
 
 /** @brief Iterative radix-2 1-D FFT, in place. sign=-1 forward, +1 inverse. */
-static void fft1d(float* re, float* im, int n, int sinal) {
+static void fft1d(float* re, float* im, int n, int sign) {
     /* bit-reversal */
     for (int i = 1, j = 0; i < n; ++i) {
         int bit = n >> 1;
@@ -115,7 +115,7 @@ static void fft1d(float* re, float* im, int n, int sinal) {
         }
     }
     for (int len = 2; len <= n; len <<= 1) {
-        const double ang = sinal * 2.0 * OMPC_PI / len;
+        const double ang = sign * 2.0 * OMPC_PI / len;
         const double wr = cos(ang), wi = sin(ang);
         for (int i = 0; i < n; i += len) {
             double cr = 1.0, ci = 0.0;
@@ -130,21 +130,21 @@ static void fft1d(float* re, float* im, int n, int sinal) {
             }
         }
     }
-    if (sinal > 0) for (int i = 0; i < n; ++i) { re[i] /= n; im[i] /= n; }
+    if (sign > 0) for (int i = 0; i < n; ++i) { re[i] /= n; im[i] /= n; }
 }
 
 /** @brief Separable 2-D FFT (rows then columns). n must be a power of two. */
-static void fft2d(std::vector<float>& re, std::vector<float>& im, int nx, int ny, int sinal) {
+static void fft2d(std::vector<float>& re, std::vector<float>& im, int nx, int ny, int sign) {
     std::vector<float> lr(nx), li(nx);
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) { lr[i] = re[(size_t)j*nx+i]; li[i] = im[(size_t)j*nx+i]; }
-        fft1d(lr.data(), li.data(), nx, sinal);
+        fft1d(lr.data(), li.data(), nx, sign);
         for (int i = 0; i < nx; ++i) { re[(size_t)j*nx+i] = lr[i]; im[(size_t)j*nx+i] = li[i]; }
     }
     std::vector<float> cr(ny), ci(ny);
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) { cr[j] = re[(size_t)j*nx+i]; ci[j] = im[(size_t)j*nx+i]; }
-        fft1d(cr.data(), ci.data(), ny, sinal);
+        fft1d(cr.data(), ci.data(), ny, sign);
         for (int j = 0; j < ny; ++j) { re[(size_t)j*nx+i] = cr[j]; im[(size_t)j*nx+i] = ci[j]; }
     }
 }
@@ -161,7 +161,7 @@ static void fftshift(std::vector<float>& a, int nx, int ny) {
 
 /* ==================== 3. FITS output (no dependencies) =================== */
 
-static bool escrever_fits(const char* fn, const std::vector<float>& img, int nx, int ny) {
+static bool write_fits(const char* fn, const std::vector<float>& img, int nx, int ny) {
     std::FILE* f = std::fopen(fn, "wb");
     if (!f) return false;
     int ncards = 0;
@@ -204,9 +204,9 @@ int main(int argc, char** argv) {
             "  e.g. %s data/large 256 5 4\n", argv[0], argv[0]);
         return 1;
     }
-    const std::string prefixo = argv[1];
+    const std::string prefix = argv[1];
     int npix   = (argc > 2) ? std::atoi(argv[2]) : 256;
-    int nciclo = (argc > 3) ? std::atoi(argv[3]) : 5;
+    int ncycles = (argc > 3) ? std::atoi(argv[3]) : 5;
     int nchan  = (argc > 4) ? std::atoi(argv[4]) : 4;
 
     /* a FFT radix-2 exige potência de 2 */
@@ -221,15 +221,15 @@ int main(int argc, char** argv) {
     std::printf("========================================================\n");
 
     /* -- Load one .vis per channel ----------------------------------------- */
-    std::vector<CanalVis> canais(nchan);
+    std::vector<ChannelVis> channels(nchan);
     double umax_global = 0.0;
     for (int c = 0; c < nchan; ++c) {
         char fn[1024];
-        std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefixo.c_str(), c);
-        if (!carregar_vis(fn, canais[c])) return 1;
-        if (canais[c].umax_wl > umax_global) umax_global = canais[c].umax_wl;
+        std::snprintf(fn, sizeof(fn), "%s_ch%d.vis", prefix.c_str(), c);
+        if (!load_vis(fn, channels[c])) return 1;
+        if (channels[c].umax_wl > umax_global) umax_global = channels[c].umax_wl;
         std::printf("  channel %d: %8d vis | %.3f MHz | u_max %.1f lambda\n",
-                    c, canais[c].nvis, canais[c].freq_hz / 1e6, canais[c].umax_wl);
+                    c, channels[c].nvis, channels[c].freq_hz / 1e6, channels[c].umax_wl);
     }
 
     /* cell size from the largest u_max (Nyquist with a 3x margin) */
@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
     const int    nx = npix, ny = npix;
     const size_t ng = (size_t)nx * ny;
     std::printf("  image  : %dx%d  cell=%.4f arcsec  cycles=%d\n",
-                nx, ny, cell / ARCSEC, nciclo);
+                nx, ny, cell / ARCSEC, ncycles);
 
     /* -- Facet phase centre --------------------------------------------------
      * By default the facet sits at the origin (l0=m0=0), so n0 = 1 and the
@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
         std::vector<float> um_re, um_im;
         std::vector<float> zmdl_re(ng, 0.0f), zmdl_im(ng, 0.0f);
         for (int c = 0; c < nchan; ++c) {
-            const CanalVis& k = canais[c];
+            const ChannelVis& k = channels[c];
             um_re.assign(k.nvis, 1.0f); um_im.assign(k.nvis, 0.0f);
             /* zero model -> dv = v = 1 -> grid(1) = PSF */
             ompc_degrid_residual_grid(k.u.data(), k.v.data(), k.w.data(),
@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
     std::printf("  PSF    : peak S = %.6g\n", (double)beam_peak);
 
     /* -- Pipeline state ---------------------------------------------------- */
-    std::vector<float> modelo(ng, 0.0f);                 /* model image (real)   */
+    std::vector<float> model(ng, 0.0f);                 /* model image (real)   */
     std::vector<float> dirty0;                            /* dirty of cycle 0     */
     std::vector<std::vector<float> > GR(nchan), GI(nchan);
     for (int c = 0; c < nchan; ++c) { GR[c].assign(ng, 0.0f); GI[c].assign(ng, 0.0f); }
@@ -312,11 +312,11 @@ int main(int argc, char** argv) {
     const double t_ini = omp_get_wtime();
     double t_offload = 0.0;
 
-    for (int ciclo = 0; ciclo < nciclo; ++ciclo) {
-        std::printf("\n=== MAJOR CYCLE %d ===\n", ciclo);
+    for (int cycle = 0; cycle < ncycles; ++cycle) {
+        std::printf("\n=== MAJOR CYCLE %d ===\n", cycle);
 
         /* (a) HOST: FFT of the model -> model UV grid */
-        std::vector<float> mdl_re(modelo), mdl_im(ng, 0.0f);
+        std::vector<float> mdl_re(model), mdl_im(ng, 0.0f);
         fftshift(mdl_re, nx, ny); fftshift(mdl_im, nx, ny);
         fft2d(mdl_re, mdl_im, nx, ny, -1);
         fftshift(mdl_re, nx, ny); fftshift(mdl_im, nx, ny);
@@ -332,13 +332,13 @@ int main(int argc, char** argv) {
         #pragma omp single
         {
             for (int c = 0; c < nchan; ++c) {
-                const int      nv  = canais[c].nvis;
-                const double*  up  = canais[c].u.data();
-                const double*  vp  = canais[c].v.data();
-                const double*  wp  = canais[c].w.data();
-                const float*   vrp = canais[c].re.data();
-                const float*   vip = canais[c].im.data();
-                const unsigned char* fp = canais[c].flag.data();
+                const int      nv  = channels[c].nvis;
+                const double*  up  = channels[c].u.data();
+                const double*  vp  = channels[c].v.data();
+                const double*  wp  = channels[c].w.data();
+                const float*   vrp = channels[c].re.data();
+                const float*   vip = channels[c].im.data();
+                const unsigned char* fp = channels[c].flag.data();
                 const float*   mrp = mdl_re.data();
                 const float*   mip = mdl_im.data();
                 float*         grp = GR[c].data();
@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
                             mrp[0:ngi], mip[0:ngi])                             \
                     map(tofrom: grp[0:ngi], gip[0:ngi])
                 {
-                    printf("[WORKER] cycle %d channel %d  pid=%d\n", ciclo, c, getpid());
+                    printf("[WORKER] cycle %d channel %d  pid=%d\n", cycle, c, getpid());
                     ompc_degrid_residual_grid(up, vp, wp, vrp, vip, fp, nv,
                                               mrp, mip, grp, gip,
                                               nx, ny, cell, l0, m0, n0m1,
@@ -386,7 +386,7 @@ int main(int argc, char** argv) {
 
         std::vector<float> dirty(ng);
         for (size_t i = 0; i < ng; ++i) dirty[i] = sre[i] / beam_peak;
-        if (ciclo == 0) dirty0 = dirty;
+        if (cycle == 0) dirty0 = dirty;
 
         double dmin = dirty[0], dmax = dirty[0], dsum = 0.0;
         for (size_t i = 0; i < ng; ++i) {
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
                 }
             if (fabsf(pv) < 1e-9f) break;
             const float delta = (float)(ganho * pv);
-            modelo[(size_t)pky*nx+pkx] += delta;
+            model[(size_t)pky*nx+pkx] += delta;
             /* subtract the PSF centred on the peak */
             const int cx = nx/2, cy = ny/2;
             for (int j = 0; j < ny; ++j) {
@@ -423,15 +423,15 @@ int main(int argc, char** argv) {
             }
         }
         double msum = 0.0; float mmax = 0.0f;
-        for (size_t i = 0; i < ng; ++i) { msum += modelo[i]; if (modelo[i]>mmax) mmax=modelo[i]; }
+        for (size_t i = 0; i < ng; ++i) { msum += model[i]; if (model[i]>mmax) mmax=model[i]; }
         std::printf("  model  : sum=%.6g peak=%.6g\n", msum, (double)mmax);
     }
 
     const double t_tot = omp_get_wtime() - t_ini;
 
     /* -- Output ------------------------------------------------------------ */
-    escrever_fits("dirty_ompc.fits", dirty0, nx, ny);
-    escrever_fits("model_ompc.fits", modelo, nx, ny);
+    write_fits("dirty_ompc.fits", dirty0, nx, ny);
+    write_fits("model_ompc.fits", model, nx, ny);
 
     /* checksum: invariant - must not depend on the number of nodes */
     double chk = 0.0;
